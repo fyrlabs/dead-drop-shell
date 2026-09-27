@@ -35,6 +35,10 @@ export class JobLedger<Result> {
   /** Creates the directory and marks jobs interrupted by a previous run `unknown`. */
   async open(): Promise<{ recovered: string[] }> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    for (const name of await readdir(this.directory)) {
+      // A write interrupted before its rename. The record it replaced is intact.
+      if (name.endsWith('.tmp')) await rm(join(this.directory, name), { force: true });
+    }
     const recovered: string[] = [];
     for (const record of await this.all()) {
       if (record.state !== 'running') continue;
@@ -85,12 +89,8 @@ export class JobLedger<Result> {
 
   private async all(): Promise<Array<JobRecord<Result>>> {
     const records: Array<JobRecord<Result>> = [];
+    // Leaves .tmp files alone: once open, one may be a write in progress.
     for (const name of await readdir(this.directory)) {
-      if (name.endsWith('.tmp')) {
-        // A write interrupted before its rename. The record it replaced is intact.
-        await rm(join(this.directory, name), { force: true });
-        continue;
-      }
       if (!name.endsWith('.json')) continue;
       const record = await this.get(name.slice(0, -'.json'.length));
       if (record) records.push(record);

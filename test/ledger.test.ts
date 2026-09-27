@@ -64,6 +64,15 @@ describe('JobLedger', () => {
     expect(await readdir(directory)).toEqual([]);
   });
 
+  it('leaves a write in progress alone when pruning', async () => {
+    const ledger = new JobLedger<string>(directory, 60_000);
+    await ledger.open();
+    const pending = `${randomUUID()}.json.tmp`;
+    await writeFile(join(directory, pending), '{"half');
+    await ledger.prune();
+    expect(await readdir(directory)).toEqual([pending]);
+  });
+
   it('refuses ids that are not UUIDs', async () => {
     const ledger = new JobLedger<string>(directory, 60_000);
     await ledger.open();
