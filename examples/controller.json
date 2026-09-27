@@ -1,0 +1,21 @@
+{
+  "dataDir": "~/.deaddrop",
+  "logLevel": "warn",
+  "workspaces": [
+    {
+      "name": "vm-shell",
+      "peerId": "laptop",
+      "secrets": ["${file:~/.deaddrop/ddshell.secret}"],
+      "transports": [
+        {
+          "use": "github",
+          "config": { "repo": "your-org/vm-shell-drop", "workDir": "~/.deaddrop/vm-shell-git" }
+        }
+      ],
+      "polling": { "minIntervalMs": 1000, "maxIntervalMs": 15000 }
+    }
+  ],
+  "shell": {
+    "targets": { "vm": "vm" }
+  }
+}

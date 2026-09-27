@@ -1,0 +1,27 @@
+{
+  "dataDir": "~/.deaddrop",
+  "logLevel": "info",
+  "workspaces": [
+    {
+      "name": "vm-shell",
+      "peerId": "vm",
+      "secrets": ["${file:~/.deaddrop/ddshell.secret}"],
+      "transports": [
+        {
+          "use": "github",
+          "config": { "repo": "your-org/vm-shell-drop", "workDir": "~/.deaddrop/vm-shell-git" }
+        }
+      ],
+      "polling": { "minIntervalMs": 1000, "maxIntervalMs": 15000 },
+      "requestTimeoutMs": 120000
+    }
+  ],
+  "shell": {
+    "allowControllers": ["laptop"],
+    "shell": "/bin/bash",
+    "outputCapBytes": 8388608,
+    "idleTimeoutMs": 1800000,
+    "commandTimeoutMs": 600000,
+    "ledgerRetentionMs": 86400000
+  }
+}

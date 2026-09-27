@@ -1,0 +1,30 @@
+# /etc/systemd/system/ddshell-agent.service
+#
+# Runs the agent as the unprivileged "ddshell" account. That account's
+# permissions are the real boundary: every allowed command runs with them.
+# Create it with: sudo useradd --system --create-home --shell /bin/bash ddshell
+
+[Unit]
+Description=ddshell agent (line-oriented remote shell over dead-drop)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ddshell
+Group=ddshell
+WorkingDirectory=~
+ExecStart=/usr/bin/env ddshell agent --config /home/ddshell/.deaddrop/ddshell.json
+Restart=on-failure
+RestartSec=5
+# Stop sends SIGTERM; the agent closes every session shell before exiting.
+KillMode=mixed
+TimeoutStopSec=30
+
+# Hardening that does not get in the way of an ordinary shell account.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
