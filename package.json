@@ -4,6 +4,12 @@
   "description": "A remote shell over dead-drop: an alternative to SSH that needs no inbound port, VPN or tunnel",
   "type": "module",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fyrlabs/dead-drop-shell.git"
+  },
+  "homepage": "https://github.com/fyrlabs/dead-drop-shell#readme",
+  "bugs": "https://github.com/fyrlabs/dead-drop-shell/issues",
   "keywords": [
     "dead-drop",
     "remote-shell",
@@ -28,7 +34,7 @@
     "node": ">=20.11"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
