@@ -12,11 +12,11 @@
           "config": {
             "repo": "your-org/vm-shell-drop",
             "workDir": "~/.deaddrop/vm-shell-git",
-            "freshnessMs": 1000
+            "freshnessMs": 5000
           }
         }
       ],
-      "polling": { "minIntervalMs": 1000, "maxIntervalMs": 15000 },
+      "polling": { "minIntervalMs": 1000, "maxIntervalMs": 30000 },
       "requestTimeoutMs": 120000
     }
   ],

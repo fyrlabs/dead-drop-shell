@@ -10,9 +10,9 @@ Measured with both peers on one Mac, a private GitHub repository and polling of 
 
 Part of that is dead-drop's git freshness window. The git transport reuses a fetch for up to `freshnessMs` (default 5000) before fetching again, and a round trip waits on that twice: once for the request, once for the answer. Over a local bare repository, a round trip took 6.1 to 11.2 s at the default and 1.0 to 2.2 s with `"freshnessMs": 100`.
 
-Over GitHub the window matters less, because pushes, fetches and polling backoff add time the window does not control. In one session with polling of 1 to 5 s, six round trips took 11.8 to 24.8 s (median about 21 s) at the default and 12.4 to 16.1 s (median about 14 s) with `"freshnessMs": 1000`. A bare `git fetch` from GitHub took 0.6 to 0.9 s, so values much below 1000 mostly add fetches. The examples set 1000.
+Over GitHub the window matters less, because pushes, fetches and polling backoff add time the window does not control. In one session with polling of 1 to 5 s, six round trips took 11.8 to 24.8 s (median about 21 s) at the default and 12.4 to 16.1 s (median about 14 s) with `"freshnessMs": 1000`. A bare `git fetch` from GitHub took 0.6 to 0.9 s, so values much below 1000 mostly add fetches. The examples use the 5000 ms default to keep an always-on deployment conservative.
 
-A lower window costs git fetches, not REST API calls: the github transport uses the API only at startup and for an occasional rate-limit check, and the REST quota did not move during these runs. GitHub returned no 403 or 429 in about a dozen round trips at 1000; an always-on server over days at that value is untested. While idle, the server polls every 15 s, longer than the window, so idle traffic is the same at any window below that.
+A lower window costs git fetches, not REST API calls: the github transport uses the API only at startup and for an occasional rate-limit check, and the REST quota did not move during these runs. GitHub returned no 403 or 429 in about a dozen round trips at 1000; an always-on server over days at that value is untested. The examples still check once a second while a reply is outstanding, but reuse each fetch for up to 5 seconds and back off to 30 seconds while idle.
 
 ## 1. Create a dedicated private repository
 
