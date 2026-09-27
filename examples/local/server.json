@@ -1,0 +1,12 @@
+{
+  "dataDir": "./server-state",
+  "workspaces": [
+    {
+      "name": "demo",
+      "peerId": "vm",
+      "secrets": ["${file:./secret}"],
+      "transports": [{ "use": "filesystem", "config": { "root": "./store" } }]
+    }
+  ],
+  "shell": { "allowControllers": ["laptop"] }
+}

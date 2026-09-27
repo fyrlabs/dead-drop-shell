@@ -40,35 +40,16 @@ This brings in `@fyrlabs/dead-drop` as a dependency. The GitHub transport also n
 
 ## Try it locally in one minute
 
-Two terminals, one shared folder, no network:
+Two terminals, one shared folder, no network. [examples/local](examples/local) has both configs:
 
 ```bash
-mkdir -p /tmp/ddshell-demo && cd /tmp/ddshell-demo
+cp -r "$(npm root -g)/@fyrlabs/dead-drop-shell/examples/local" /tmp/ddshell-demo
+cd /tmp/ddshell-demo
 npx --package @fyrlabs/dead-drop ddrop keygen | head -1 > secret
-```
+chmod 600 secret
 
-Write `vm.json`:
-
-```json
-{
-  "dataDir": "./vm-state",
-  "workspaces": [
-    {
-      "name": "demo",
-      "peerId": "vm",
-      "secrets": ["${file:./secret}"],
-      "transports": [{ "use": "filesystem", "config": { "root": "./store" } }]
-    }
-  ],
-  "shell": { "allowControllers": ["laptop"] }
-}
-```
-
-Copy it to `laptop.json`, change `peerId` to `laptop`, `dataDir` to `./laptop-state`, and replace the `shell` section with `{ "targets": { "vm": "vm" } }`. Then:
-
-```bash
-ddshell serve --config vm.json          # terminal 1
-ddshell vm --config laptop.json         # terminal 2
+ddshell serve --config server.json        # terminal 1
+ddshell vm --config controller.json       # terminal 2
 ```
 
 For a real VM over GitHub, follow [docs/github-setup.md](docs/github-setup.md).

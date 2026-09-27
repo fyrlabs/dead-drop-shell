@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +51,12 @@ describe('config', () => {
     const controller = await loadConfig(join(examples, 'controller.json'));
     expect(controller.shell.targets).toEqual({ vm: 'vm' });
     expect(controller.shell.allowControllers).toEqual([]);
+    const demo = join(home, 'demo');
+    await cp(join(examples, 'local'), demo, { recursive: true });
+    await writeFile(join(demo, 'secret'), `${generateWorkspaceSecret()}\n`);
+    const local = await loadConfig(join(demo, 'server.json'));
+    expect(local.shell.ledgerDir).toBe(join(demo, 'server-state', 'ddshell-ledger'));
+    expect((await loadConfig(join(demo, 'controller.json'))).shell.targets).toEqual({ vm: 'vm' });
   });
 
   it('applies defaults', () => {

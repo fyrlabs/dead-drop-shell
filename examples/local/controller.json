@@ -1,0 +1,13 @@
+{
+  "dataDir": "./controller-state",
+  "logLevel": "warn",
+  "workspaces": [
+    {
+      "name": "demo",
+      "peerId": "laptop",
+      "secrets": ["${file:./secret}"],
+      "transports": [{ "use": "filesystem", "config": { "root": "./store" } }]
+    }
+  ],
+  "shell": { "targets": { "vm": "vm" } }
+}
