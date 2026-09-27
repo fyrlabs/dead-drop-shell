@@ -87,7 +87,7 @@ export class RemoteSession {
    */
   async exec(
     command: string,
-    options: { timeoutMs?: number; jobId?: string; close?: boolean } = {},
+    options: { timeoutMs?: number; jobId?: string; close?: boolean; signal?: AbortSignal } = {},
   ): Promise<ExecResponse> {
     const request: ExecRequest = {
       v: 1,
@@ -102,6 +102,7 @@ export class RemoteSession {
     // the same job as a duplicate. The server's ledger deduplicates jobs instead.
     const response = await this.workspace.call<ExecResponse>(this.peer, SHELL_CHANNEL, request, {
       timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     this.opened = true;
     return response;

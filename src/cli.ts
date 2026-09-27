@@ -166,11 +166,15 @@ async function interactive(
   let cwd = '~';
   let waiting = false;
   let interrupts = 0;
+  let currentAbort: AbortController | undefined;
+  let abandonSession = false;
+  let sessionEnded = false;
+  const terminal = io.stdin.isTTY === true;
 
   const lines = createInterface({
     input: io.stdin,
     output: io.stdout,
-    terminal: io.stdin.isTTY === true,
+    terminal,
   });
   // Like a shell, prompt only at a terminal, so piped scripts get clean output.
   // Readline also throws on a prompt after close, which piped input reaches
@@ -178,6 +182,12 @@ async function interactive(
   let inputClosed = io.stdin.isTTY !== true;
   lines.on('close', () => {
     inputClosed = true;
+    // EOF at a terminal is an explicit request to leave. Piped input also
+    // closes while buffered commands are still draining, so never abort it.
+    if (terminal && waiting) {
+      abandonSession = true;
+      currentAbort?.abort();
+    }
   });
   const prompt = () => {
     if (inputClosed) return;
@@ -192,6 +202,8 @@ async function interactive(
     }
     interrupts += 1;
     if (interrupts > 1) {
+      abandonSession = true;
+      currentAbort?.abort();
       lines.close();
       return;
     }
@@ -210,8 +222,19 @@ async function interactive(
       }
       waiting = true;
       interrupts = 0;
-      const response = await send(io, session, line, { timeoutMs, debug });
-      waiting = false;
+      currentAbort = new AbortController();
+      let response: ExecResponse | undefined;
+      try {
+        response = await send(io, session, line, {
+          timeoutMs,
+          debug,
+          signal: currentAbort.signal,
+        });
+      } finally {
+        currentAbort = undefined;
+        waiting = false;
+      }
+      if (abandonSession) break;
       if (response?.state === 'session_lost') {
         session = client.session(peer);
         cwd = '~';
@@ -221,13 +244,16 @@ async function interactive(
       } else if (response?.state === 'completed') {
         cwd = display(response.cwd, response.home);
         status = response.exitCode ?? status;
-        if (response.sessionClosed) break;
+        if (response.sessionClosed) {
+          sessionEnded = true;
+          break;
+        }
       }
       prompt();
     }
   } finally {
     lines.close();
-    await session.close().catch(() => undefined);
+    if (!abandonSession && !sessionEnded) await session.close().catch(() => undefined);
     await client.stop();
   }
   return status;
@@ -238,7 +264,7 @@ async function send(
   io: Io,
   session: RemoteSession,
   command: string,
-  options: { timeoutMs: number; debug: boolean; close?: boolean },
+  options: { timeoutMs: number; debug: boolean; close?: boolean; signal?: AbortSignal },
 ): Promise<ExecResponse | undefined> {
   const note = (message: string) => io.stderr.write(`[ddshell] ${message}\n`);
   const jobId = crypto.randomUUID();
@@ -249,8 +275,12 @@ async function send(
       jobId,
       timeoutMs: options.timeoutMs,
       ...(options.close ? { close: true } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
   } catch (error) {
+    if (options.signal?.aborted && DeadDropError.is(error) && error.code === 'CANCELLED') {
+      return undefined;
+    }
     if (DeadDropError.is(error) && error.code === 'TIMEOUT') {
       note(
         `no answer within ${options.timeoutMs}ms. Job ${jobId} may still be running on the target, and later commands in this session wait behind it.`,

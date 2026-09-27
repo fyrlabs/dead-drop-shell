@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { generateWorkspaceSecret } from '@fyrlabs/dead-drop/protocol';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -9,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ShellServer } from '../src/server.js';
 import { VERSION, main, type Io } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
+import { waitFor } from './helpers.js';
 
 let root: string;
 let home: string;
@@ -53,6 +55,55 @@ function io(input = ''): Io & { out: () => string; err: () => string } {
     out: () => Buffer.concat(chunks.out).toString(),
     err: () => Buffer.concat(chunks.err).toString(),
   };
+}
+
+function terminalIo(): Io & {
+  stdin: PassThrough & { isTTY: true; setRawMode(mode: boolean): PassThrough };
+  out: () => string;
+  err: () => string;
+} {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const chunks = { out: [] as Buffer[], err: [] as Buffer[] };
+  stdout.on('data', (chunk: Buffer) => chunks.out.push(chunk));
+  stderr.on('data', (chunk: Buffer) => chunks.err.push(chunk));
+  const stdin = new PassThrough() as PassThrough & {
+    isTTY: true;
+    setRawMode(mode: boolean): PassThrough;
+  };
+  stdin.isTTY = true;
+  stdin.setRawMode = () => stdin;
+  return {
+    stdin,
+    stdout,
+    stderr,
+    env: {},
+    out: () => Buffer.concat(chunks.out).toString(),
+    err: () => Buffer.concat(chunks.err).toString(),
+  };
+}
+
+async function waitForRunningJob(): Promise<void> {
+  const ledger = join(root, 'vm-state', 'ddshell-ledger');
+  const deadline = Date.now() + 3000;
+  while (Date.now() <= deadline) {
+    const names = await readdir(ledger).catch(() => [] as string[]);
+    for (const name of names.filter((entry) => entry.endsWith('.json'))) {
+      const record = JSON.parse(await readFile(join(ledger, name), 'utf8')) as { state?: string };
+      if (record.state === 'running') return;
+    }
+    await delay(25);
+  }
+  throw new Error('remote job did not start in time');
+}
+
+async function promptly<T>(promise: Promise<T>): Promise<T> {
+  return Promise.race([
+    promise,
+    delay(2000).then(() => {
+      throw new Error('interactive client did not exit promptly');
+    }),
+  ]);
 }
 
 beforeEach(async () => {
@@ -112,6 +163,44 @@ describe('ddshell cli', () => {
     expect(code).toBe(0);
     // No prompts: like a shell, they are for terminals only.
     expect(streams.out()).toBe(`/\n${home}\n`);
+  });
+
+  it('Ctrl-D closes an opened interactive session', async () => {
+    const streams = terminalIo();
+    const running = main(['vm', '--config', controllerConfig], streams);
+    await waitFor(() => streams.out().includes('vm:~$ '));
+
+    streams.stdin.write('echo ready\n');
+    await waitFor(() => streams.out().split('vm:~$ ').length >= 3);
+    streams.stdin.write('\u0004');
+
+    expect(await promptly(running)).toBe(0);
+  });
+
+  it('Ctrl-D abandons a pending command without waiting for its timeout', async () => {
+    const streams = terminalIo();
+    const running = main(['vm', '--config', controllerConfig], streams);
+    await waitFor(() => streams.out().includes('vm:~$ '));
+
+    streams.stdin.write('sleep 30\n');
+    await waitForRunningJob();
+    streams.stdin.write('\u0004');
+
+    expect(await promptly(running)).toBe(0);
+  });
+
+  it('a second Ctrl-C abandons a pending command immediately', async () => {
+    const streams = terminalIo();
+    const running = main(['vm', '--config', controllerConfig], streams);
+    await waitFor(() => streams.out().includes('vm:~$ '));
+
+    streams.stdin.write('sleep 30\n');
+    await waitForRunningJob();
+    streams.stdin.write('\u0003');
+    await waitFor(() => streams.err().includes('Press Ctrl-C again to leave'));
+    streams.stdin.write('\u0003');
+
+    expect(await promptly(running)).toBe(0);
   });
 
   it('rejects a bad timeout before starting anything', async () => {

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Make Ctrl-D leave an interactive session reliably, including while a remote command is pending.
+- Make a second Ctrl-C abandon a pending local wait immediately while leaving the remote command's outcome unchanged.
+
 ## 0.1.0
 
 First version: a remote shell over dead-drop, an alternative to SSH for machines with no open port.

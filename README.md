@@ -64,6 +64,8 @@ For a real VM over GitHub, follow [docs/github-setup.md](docs/github-setup.md).
 
 The config file is `--config`, else `$DDSHELL_CONFIG`, else `~/.deaddrop/ddshell.json`. `<target>` is looked up in `shell.targets`; an unmapped name is used as the server's peer id directly. `--timeout` is how long the client waits for an answer (default 120000). `--debug` shows runtime logs and a per-command line with the job id, server-side duration and round trip.
 
+In an interactive session, Ctrl-D closes the remote session and exits. While a command is pending, the first Ctrl-C warns that phase one cannot cancel the remote command; a second Ctrl-C or Ctrl-D abandons the local wait and exits immediately. The command may continue on the target.
+
 `exec` exit codes: the remote exit code, `124` when the command hit the server's `commandTimeoutMs`, `125` when the outcome is unknown (below), `255` when ddshell itself failed.
 
 ## What each command returns
