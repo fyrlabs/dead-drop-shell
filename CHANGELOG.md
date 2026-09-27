@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0
 
 First version: a remote shell over dead-drop, an alternative to SSH for machines with no open port.
 
