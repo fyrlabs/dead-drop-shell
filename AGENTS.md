@@ -19,7 +19,7 @@ npm run format      # prettier --write
 | `src/ledger.ts`   | `JobLedger`: one JSON file per job id, atomic writes, `running` becomes `unknown` on open         |
 | `src/protocol.ts` | `shell.v1` request and response types, `parseRequest`                                             |
 | `src/config.ts`   | `shell` config section, defaults, `loadConfig`                                                    |
-| `src/agent.ts`    | `ShellAgent`: embedded runtime, authorisation, sessions, ledger, idle sweep                       |
+| `src/server.ts`   | `ShellServer`: embedded runtime, authorisation, sessions, ledger, idle sweep                      |
 | `src/client.ts`   | `ShellClient`, `RemoteSession`                                                                    |
 | `src/cli.ts`      | argument parsing, interactive loop, `exec`, exit codes                                            |
 | `test/`           | unit tests plus integration tests over dead-drop's filesystem transport                           |
@@ -33,7 +33,7 @@ npm run format      # prettier --write
 - The client must not pass `idempotencyKey` to dead-drop. The mailbox would drop a deliberate re-ask of the same job; the ledger handles duplicates.
 - A command for a session that no longer exists is answered `session_lost` and not run.
 - Never hard-code the version. `VERSION` comes from `package.json`.
-- The agent is POSIX only. Anything shell-specific must work under `dash`, not just `bash`.
+- The server is POSIX only. Anything shell-specific must work under `dash`, not just `bash`.
 - Use only dead-drop's public exports. Anything dead-drop is missing goes in [docs/upstream-requirements.md](docs/upstream-requirements.md), not in a workaround that reaches into its internals.
 
 ## Conventions

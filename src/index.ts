@@ -1,4 +1,4 @@
-export { ShellAgent, assertSupportedPlatform, type AgentOptions } from './agent.js';
+export { ShellServer, assertSupportedPlatform, type ServerOptions } from './server.js';
 export {
   DEFAULT_COMMAND_TIMEOUT_MS,
   RemoteSession,

@@ -22,7 +22,7 @@ export interface JobRecord<Result> {
  *
  * dead-drop delivers at least once, so the same job can arrive twice. A
  * completed job answers from here instead of running again, and a job that was
- * `running` when the agent stopped is reported as `unknown` from then on:
+ * `running` when the server stopped is reported as `unknown` from then on:
  * it may have run, partly run, or not run, and nothing here can tell which.
  */
 export class JobLedger<Result> {

@@ -23,12 +23,12 @@ import {
 } from './protocol.js';
 import { ShellSession } from './session.js';
 
-export interface AgentOptions {
+export interface ServerOptions {
   runtime: RuntimeConfig;
   shell: ShellConfig;
   baseDir?: string;
   logFormat?: 'json' | 'pretty';
-  /** Directory sessions start in. Defaults to the agent account's home. */
+  /** Directory sessions start in. Defaults to the server account's home. */
   home?: string;
 }
 
@@ -39,8 +39,8 @@ export interface AgentOptions {
 const DEFAULT_CONCURRENCY = 8;
 
 /**
- * Variables that belong to the agent, not to the shells it runs. The OS account
- * can still read the secret file the agent reads; this only keeps it out of
+ * Variables that belong to the server, not to the shells it runs. The OS account
+ * can still read the secret file the server reads; this only keeps it out of
  * `env` output that might be pasted somewhere.
  */
 const PRIVATE_ENV = /^(DEADDROP_|DDSHELL_)/;
@@ -49,12 +49,12 @@ export function assertSupportedPlatform(platform: NodeJS.Platform = process.plat
   if (platform === 'win32') {
     throw new DeadDropError(
       'UNSUPPORTED',
-      'ddshell agent needs a POSIX shell and process groups; Windows is not supported in phase one',
+      'ddshell serve needs a POSIX shell and process groups; Windows is not supported in phase one',
     );
   }
 }
 
-export class ShellAgent {
+export class ShellServer {
   readonly runtime: DeadDropRuntime;
   private readonly workspace: Workspace;
   private readonly sessions = new Map<string, ShellSession>();
@@ -69,7 +69,7 @@ export class ShellAgent {
   private stopping = false;
 
   private constructor(
-    private readonly options: AgentOptions,
+    private readonly options: ServerOptions,
     private readonly ledger: JobLedger<JobResult>,
     runtime: DeadDropRuntime,
   ) {
@@ -85,7 +85,7 @@ export class ShellAgent {
     this.env.HOME = this.home;
   }
 
-  static async start(options: AgentOptions): Promise<ShellAgent> {
+  static async start(options: ServerOptions): Promise<ShellServer> {
     assertSupportedPlatform();
     const ledger = new JobLedger<JobResult>(
       options.shell.ledgerDir,
@@ -106,31 +106,31 @@ export class ShellAgent {
       ...(options.logFormat ? { logFormat: options.logFormat } : {}),
     });
     await runtime.start();
-    const agent = new ShellAgent(options, ledger, runtime);
+    const server = new ShellServer(options, ledger, runtime);
 
     for (const jobId of recovered) {
-      agent.runtime.logger.warn(
-        'job was running when the agent stopped; it is now unknown and will not be rerun',
+      server.runtime.logger.warn(
+        'job was running when the server stopped; it is now unknown and will not be rerun',
         { jobId },
       );
     }
     if (options.shell.allowControllers.length === 0) {
-      agent.runtime.logger.warn('shell.allowControllers is empty: every request will be refused');
+      server.runtime.logger.warn('shell.allowControllers is empty: every request will be refused');
     }
-    agent.workspace.service(SHELL_SERVICE, {
-      [SHELL_METHOD]: (input, context) => agent.handle(input, context),
+    server.workspace.service(SHELL_SERVICE, {
+      [SHELL_METHOD]: (input, context) => server.handle(input, context),
     });
     const interval = Math.max(10, Math.min(options.shell.idleTimeoutMs / 4, 30_000));
     // Deliberately not unref'd: dead-drop unrefs its own poll timers, and over
     // git or GitHub nothing else holds the event loop open between polls.
-    agent.sweeper = setInterval(() => void agent.sweep(), interval);
-    agent.runtime.logger.info('shell agent ready', {
-      workspace: agent.workspace.name,
-      peerId: agent.workspace.identity,
+    server.sweeper = setInterval(() => void server.sweep(), interval);
+    server.runtime.logger.info('shell server ready', {
+      workspace: server.workspace.name,
+      peerId: server.workspace.identity,
       channel: SHELL_CHANNEL,
       allowControllers: options.shell.allowControllers,
     });
-    return agent;
+    return server;
   }
 
   /** Process ids of live session shells. For tests and diagnostics. */
@@ -159,11 +159,11 @@ export class ShellAgent {
       });
       throw new DeadDropError(
         'UNAUTHORIZED',
-        `peer "${context.identity}" is not in this agent's shell.allowControllers`,
+        `peer "${context.identity}" is not in this server's shell.allowControllers`,
       );
     }
     if (this.stopping) {
-      throw new DeadDropError('UNSUPPORTED', 'shell agent is shutting down', { retryable: true });
+      throw new DeadDropError('UNSUPPORTED', 'shell server is shutting down', { retryable: true });
     }
     const request = parseRequest(input);
     if (request.op === 'close') {
@@ -220,7 +220,7 @@ export class ShellAgent {
           jobId,
           state: 'session_lost',
           message:
-            'this shell session no longer exists on the agent (idle timeout, exit, or agent restart); the command was not run',
+            'this shell session no longer exists on the server (idle timeout, exit, or server restart); the command was not run',
         };
       }
       session = new ShellSession({

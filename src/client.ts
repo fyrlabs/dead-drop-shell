@@ -25,7 +25,7 @@ export interface ClientOptions {
  */
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 
-/** Maps a target name to an agent peer id. An unmapped name is taken as a peer id. */
+/** Maps a target name to a server peer id. An unmapped name is taken as a peer id. */
 export function resolveTarget(shell: ShellConfig, target: string): string {
   return shell.targets[target] ?? target;
 }
@@ -34,7 +34,7 @@ export function resolveTarget(shell: ShellConfig, target: string): string {
  * Controller side. Embeds its own runtime for the life of the process, under a
  * per-process mailbox address so it can share a config file with a `ddrop
  * start` on the same machine without the two fighting over one inbox. The
- * agent still sees the configured peer id as the caller's identity.
+ * server still sees the configured peer id as the caller's identity.
  */
 export class ShellClient {
   // dead-drop unrefs its poll and timeout timers, and over git or GitHub nothing
@@ -82,7 +82,7 @@ export class RemoteSession {
 
   /**
    * Runs one command. `jobId` is exposed so a caller that timed out can ask
-   * again for the same job: the agent answers from its ledger instead of
+   * again for the same job: the server answers from its ledger instead of
    * running the command twice.
    */
   async exec(
@@ -99,7 +99,7 @@ export class RemoteSession {
       ...(options.close ? { close: true } : {}),
     };
     // No `idempotencyKey`: the mailbox would then drop a deliberate re-ask for
-    // the same job as a duplicate. The agent's ledger deduplicates jobs instead.
+    // the same job as a duplicate. The server's ledger deduplicates jobs instead.
     const response = await this.workspace.call<ExecResponse>(this.peer, SHELL_CHANNEL, request, {
       timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
     });

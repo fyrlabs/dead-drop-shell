@@ -4,7 +4,7 @@ ddshell is phase one of dead-drop's [application extension proposal](https://git
 
 ## Register handlers before the mailbox starts
 
-`workspace.service()` can only be called after `runtime.start()`, which already starts polling. A request that was queued while the agent was down could in principle be picked up before the `shell.v1` handler exists. The integration test for exactly that case passes, but that shows the current timing works, not that it is guaranteed. A host should accept registrations first and start the mailbox after, or document that a request for an unregistered channel is retried rather than answered as not found.
+`workspace.service()` can only be called after `runtime.start()`, which already starts polling. A request that was queued while the server was down could in principle be picked up before the `shell.v1` handler exists. The integration test for exactly that case passes, but that shows the current timing works, not that it is guaranteed. A host should accept registrations first and start the mailbox after, or document that a request for an unregistered channel is retried rather than answered as not found.
 
 ## `idempotencyKey` and re-asking conflict
 

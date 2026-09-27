@@ -6,13 +6,13 @@ import { PassThrough } from 'node:stream';
 import { generateWorkspaceSecret } from '@fyrlabs/dead-drop/protocol';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { ShellAgent } from '../src/agent.js';
+import { ShellServer } from '../src/server.js';
 import { VERSION, main, type Io } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 
 let root: string;
 let home: string;
-let agent: ShellAgent;
+let server: ShellServer;
 let controllerConfig: string;
 
 async function writeConfig(peerId: string, secretFile: string): Promise<string> {
@@ -61,13 +61,13 @@ beforeEach(async () => {
   await mkdir(home);
   const secretFile = join(root, 'secret');
   await writeFile(secretFile, `${generateWorkspaceSecret()}\n`, { mode: 0o600 });
-  const agentConfig = await loadConfig(await writeConfig('vm', secretFile));
-  agent = await ShellAgent.start({ ...agentConfig, home });
+  const serverConfig = await loadConfig(await writeConfig('vm', secretFile));
+  server = await ShellServer.start({ ...serverConfig, home });
   controllerConfig = await writeConfig('laptop', secretFile);
 });
 
 afterEach(async () => {
-  await agent.stop();
+  await server.stop();
   await rm(root, { recursive: true, force: true });
 });
 

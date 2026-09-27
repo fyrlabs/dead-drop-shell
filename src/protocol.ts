@@ -11,7 +11,7 @@ export const SHELL_CHANNEL = `${SHELL_SERVICE}.${SHELL_METHOD}`;
 export interface ExecRequest {
   v: 1;
   op: 'exec';
-  /** Chosen by the client. Scoped to the caller's identity on the agent. */
+  /** Chosen by the client. Scoped to the caller's identity on the server. */
   sessionId: string;
   /** Chosen by the client, unique per command. The deduplication key. */
   jobId: string;
@@ -33,7 +33,7 @@ export type ShellRequest = ExecRequest | CloseRequest;
 export interface JobResult {
   jobId: string;
   /**
-   * `unknown` means the agent stopped while this job was running. It may have
+   * `unknown` means the server stopped while this job was running. It may have
    * run fully, partly, or not at all, and it will not be run again.
    */
   state: 'completed' | 'unknown';
@@ -44,7 +44,7 @@ export interface JobResult {
   exitCode: number | null;
   durationMs: number;
   cwd: string;
-  /** The agent account's home, so a client can abbreviate `cwd` to `~`. */
+  /** The server account's home, so a client can abbreviate `cwd` to `~`. */
   home: string;
   truncated: boolean;
   timedOut: boolean;
@@ -55,7 +55,7 @@ export interface JobResult {
 
 /**
  * The session this command named no longer exists: it idled out, exited, or
- * the agent restarted. The command was not run. Silently opening a fresh shell
+ * the server restarted. The command was not run. Silently opening a fresh shell
  * in the home directory instead would run it somewhere the user did not `cd` to.
  */
 export interface SessionLost {
@@ -72,7 +72,7 @@ export interface CloseResult {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** Job and session ids become file names on the agent, so only UUIDs are accepted. */
+/** Job and session ids become file names on the server, so only UUIDs are accepted. */
 export function isJobId(value: unknown): value is string {
   return typeof value === 'string' && UUID.test(value);
 }

@@ -8,23 +8,23 @@ Never put a secret in the file. Reference it: `"secrets": ["${file:~/.deaddrop/d
 
 ## `shell`
 
-| Field               | Used by    | Default                    | Notes                                                                                                                                                |
-| ------------------- | ---------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workspace`         | both       | first workspace            | Which workspace carries shell traffic. Must name a configured workspace.                                                                             |
-| `allowControllers`  | agent      | `[]`                       | Peer ids allowed to run commands, matched against dead-drop's authenticated caller identity. Empty refuses everyone, and the agent warns at startup. |
-| `shell`             | agent      | `/bin/sh`                  | Absolute path to a POSIX shell. `/bin/bash` is the usual choice. It runs non-interactive and non-login, so it does not read `.bashrc` or `.profile`. |
-| `outputCapBytes`    | agent      | `8388608` (8 MiB)          | stdout plus stderr kept per command. The rest is dropped and the result says `truncated`.                                                            |
-| `idleTimeoutMs`     | agent      | `1800000` (30 min)         | A session with no command for this long is closed. A running command never counts as idle.                                                           |
-| `commandTimeoutMs`  | agent      | `600000` (10 min)          | A command running longer is killed together with its session.                                                                                        |
-| `ledgerDir`         | agent      | `<dataDir>/ddshell-ledger` | Job states. Relative paths resolve against the config file; `~` is expanded.                                                                         |
-| `ledgerRetentionMs` | agent      | `86400000` (24 h)          | How long finished job records, including their output, are kept for replay.                                                                          |
-| `targets`           | controller | `{}`                       | Short names to agent peer ids, e.g. `{ "vm": "build-vm-01" }`. An unmapped target is used as a peer id.                                              |
+| Field               | Used by    | Default                    | Notes                                                                                                                                                 |
+| ------------------- | ---------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workspace`         | both       | first workspace            | Which workspace carries shell traffic. Must name a configured workspace.                                                                              |
+| `allowControllers`  | server     | `[]`                       | Peer ids allowed to run commands, matched against dead-drop's authenticated caller identity. Empty refuses everyone, and the server warns at startup. |
+| `shell`             | server     | `/bin/sh`                  | Absolute path to a POSIX shell. `/bin/bash` is the usual choice. It runs non-interactive and non-login, so it does not read `.bashrc` or `.profile`.  |
+| `outputCapBytes`    | server     | `8388608` (8 MiB)          | stdout plus stderr kept per command. The rest is dropped and the result says `truncated`.                                                             |
+| `idleTimeoutMs`     | server     | `1800000` (30 min)         | A session with no command for this long is closed. A running command never counts as idle.                                                            |
+| `commandTimeoutMs`  | server     | `600000` (10 min)          | A command running longer is killed together with its session.                                                                                         |
+| `ledgerDir`         | server     | `<dataDir>/ddshell-ledger` | Job states. Relative paths resolve against the config file; `~` is expanded.                                                                          |
+| `ledgerRetentionMs` | server     | `86400000` (24 h)          | How long finished job records, including their output, are kept for replay.                                                                           |
+| `targets`           | controller | `{}`                       | Short names to server peer ids, e.g. `{ "vm": "build-vm-01" }`. An unmapped target is used as a peer id.                                              |
 
 `${env:...}` and `${file:...}` references are expanded only in the dead-drop part of the file, not inside `shell`.
 
-## Values the agent changes
+## Values the server changes
 
-When the shell's workspace does not set `concurrency`, the agent uses `8` instead of dead-drop's default of `1`. At `1`, one `sleep 60` would hold up every other session's commands.
+When the shell's workspace does not set `concurrency`, the server uses `8` instead of dead-drop's default of `1`. At `1`, one `sleep 60` would hold up every other session's commands.
 
 ## Choosing the 8 MiB cap
 

@@ -10,21 +10,21 @@ export const DEFAULT_CONFIG_PATH = join(homedir(), '.deaddrop', 'ddshell.json');
 export interface ShellConfig {
   /** Workspace carrying shell traffic. Defaults to the first one. */
   workspace?: string;
-  /** Agent: peer identities allowed to run commands. Empty refuses everyone. */
+  /** Server: peer identities allowed to run commands. Empty refuses everyone. */
   allowControllers: string[];
-  /** Agent: POSIX shell each session runs. */
+  /** Server: POSIX shell each session runs. */
   shell: string;
-  /** Agent: stdout + stderr bytes kept per command. */
+  /** Server: stdout + stderr bytes kept per command. */
   outputCapBytes: number;
-  /** Agent: a session with no command for this long is closed. */
+  /** Server: a session with no command for this long is closed. */
   idleTimeoutMs: number;
-  /** Agent: a command running longer than this kills its session. */
+  /** Server: a command running longer than this kills its session. */
   commandTimeoutMs: number;
-  /** Agent: where job states are kept. */
+  /** Server: where job states are kept. */
   ledgerDir: string;
-  /** Agent: how long finished job records are kept for replay. */
+  /** Server: how long finished job records are kept for replay. */
   ledgerRetentionMs: number;
-  /** Controller: short target names mapped to agent peer ids. */
+  /** Controller: short target names mapped to server peer ids. */
   targets: Record<string, string>;
 }
 

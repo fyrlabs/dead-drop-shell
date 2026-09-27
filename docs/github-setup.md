@@ -55,26 +55,26 @@ On both machines:
 npm install -g @fyrlabs/dead-drop-shell
 ```
 
-On the VM, copy [examples/agent.json](../examples/agent.json) to `/home/ddshell/.deaddrop/ddshell.json` and set `repo`. On your machine, copy [examples/controller.json](../examples/controller.json) to `~/.deaddrop/ddshell.json` and set the same `repo`. The peer ids must match: the controller's `peerId` must appear in the agent's `allowControllers`, and the controller's `targets` must point at the agent's `peerId`.
+On the VM, copy [examples/server.json](../examples/server.json) to `/home/ddshell/.deaddrop/ddshell.json` and set `repo`. On your machine, copy [examples/controller.json](../examples/controller.json) to `~/.deaddrop/ddshell.json` and set the same `repo`. The peer ids must match: the controller's `peerId` must appear in the server's `allowControllers`, and the controller's `targets` must point at the server's `peerId`.
 
-Try the agent in the foreground first:
+Try the server in the foreground first:
 
 ```bash
-sudo -iu ddshell ddshell agent
+sudo -iu ddshell ddshell serve
 ```
 
-## 6. Run the agent under systemd
+## 6. Run the server under systemd
 
 ```bash
-sudo cp examples/ddshell-agent.service /etc/systemd/system/
+sudo cp examples/ddshell-server.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now ddshell-agent
-journalctl -u ddshell-agent -f
+sudo systemctl enable --now ddshell-server
+journalctl -u ddshell-server -f
 ```
 
 The unit runs `ddshell` through `/usr/bin/env`, so it must be on systemd's `PATH`. If `npm install -g` put it somewhere else (nvm, a user prefix), write the absolute path into `ExecStart`.
 
-`systemctl stop` sends SIGTERM; the agent kills every session shell and its background jobs before exiting. A restart loses every session, and a command that was running at that moment is reported as unknown.
+`systemctl stop` sends SIGTERM; the server kills every session shell and its background jobs before exiting. A restart loses every session, and a command that was running at that moment is reported as unknown.
 
 The unit has not been tested on a real Linux host yet.
 
@@ -89,4 +89,4 @@ Add `--debug` to see the job id, the time spent on the target machine and the fu
 
 ## Removing a controller
 
-Taking a name out of `allowControllers` stops the agent from serving it, but anyone still holding the current key era can claim any peer id, including one that is still allowed. Real removal is dead-drop's: set `"enrollment": { "requireApproval": true }` on the workspace, approve the peers that stay, then run `ddrop peer revoke <peer>` and `ddrop rotate`. Read dead-drop's security model (`docs/security-model.md`) before relying on it; the removed peer can still read everything written before the rotation. The agent re-reads its config only on restart.
+Taking a name out of `allowControllers` stops the server from serving it, but anyone still holding the current key era can claim any peer id, including one that is still allowed. Real removal is dead-drop's: set `"enrollment": { "requireApproval": true }` on the workspace, approve the peers that stay, then run `ddrop peer revoke <peer>` and `ddrop rotate`. Read dead-drop's security model (`docs/security-model.md`) before relying on it; the removed peer can still read everything written before the rotation. The server re-reads its config only on restart.

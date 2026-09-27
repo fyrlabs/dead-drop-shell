@@ -5,7 +5,7 @@ import { parseArgs } from 'node:util';
 
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
 
-import { ShellAgent } from './agent.js';
+import { ShellServer } from './server.js';
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   ShellClient,
@@ -24,13 +24,13 @@ export const VERSION = (
 const USAGE = `ddshell ${VERSION}: a line-oriented remote shell over dead-drop. Not SSH, no TTY.
 
 Usage:
-  ddshell agent [--config <file>]
+  ddshell serve [--config <file>]
   ddshell <target> [--config <file>] [--timeout <ms>] [--debug]
   ddshell exec <target> [--config <file>] [--timeout <ms>] [--debug] -- <command...>
 
 Config: --config, else $DDSHELL_CONFIG, else ${DEFAULT_CONFIG_PATH}
 Exit codes (exec): the remote exit code; 124 timed out on the target; 125 unknown
-outcome after an agent restart; 255 ddshell itself failed.
+outcome after a server restart; 255 ddshell itself failed.
 `;
 
 export interface Io {
@@ -86,9 +86,9 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
 
   try {
     const [command, target, ...rest] = positionals;
-    if (command === 'agent') {
-      if (target !== undefined) throw usage('agent takes no positional arguments');
-      return await agent(configPath);
+    if (command === 'serve') {
+      if (target !== undefined) throw usage('serve takes no positional arguments');
+      return await serve(configPath);
     }
     const config = await loadConfig(configPath);
     if (command === 'exec') {
@@ -114,9 +114,9 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function agent(configPath: string): Promise<number> {
+async function serve(configPath: string): Promise<number> {
   const config = await loadConfig(configPath);
-  const running = await ShellAgent.start({
+  const running = await ShellServer.start({
     runtime: config.runtime,
     shell: config.shell,
     baseDir: config.baseDir,
@@ -267,19 +267,20 @@ async function send(
   }
   if (response.state === 'unknown') {
     note(
-      `job ${jobId} is UNKNOWN: the agent restarted while it was running. It may have run fully, partly or not at all, and it will not be rerun.`,
+      `job ${jobId} is UNKNOWN: the server restarted while it was running. It may have run fully, partly or not at all, and it will not be rerun.`,
     );
     return response;
   }
   io.stdout.write(Buffer.from(response.stdout, 'base64'));
   io.stderr.write(Buffer.from(response.stderr, 'base64'));
-  if (response.truncated) note('output truncated at the agent output cap');
-  if (response.timedOut) note('command exceeded the agent command timeout; its session was killed');
+  if (response.truncated) note('output truncated at the server output cap');
+  if (response.timedOut)
+    note('command exceeded the server command timeout; its session was killed');
   else if (response.sessionClosed && !options.close) note('remote session closed');
   if (options.debug) {
     const roundTrip = Math.round(performance.now() - started);
     note(
-      `job ${jobId} exit ${response.exitCode} agent ${response.durationMs}ms round trip ${roundTrip}ms${response.replayed ? ' (replayed)' : ''}`,
+      `job ${jobId} exit ${response.exitCode} server ${response.durationMs}ms round trip ${roundTrip}ms${response.replayed ? ' (replayed)' : ''}`,
     );
   }
   return response;

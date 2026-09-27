@@ -41,8 +41,8 @@ const runtime = () =>
 
 describe('config', () => {
   it('loads the shipped examples', async () => {
-    const agent = await loadConfig(join(examples, 'agent.json'));
-    expect(agent.shell).toMatchObject({
+    const server = await loadConfig(join(examples, 'server.json'));
+    expect(server.shell).toMatchObject({
       allowControllers: ['laptop'],
       shell: '/bin/bash',
       outputCapBytes: 8 * 1024 * 1024,

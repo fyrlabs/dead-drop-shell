@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 export interface SessionOptions {
   /** POSIX shell executable, e.g. `/bin/sh` or `/bin/bash`. */
   shell: string;
-  /** Directory the shell starts in: the agent account's home. */
+  /** Directory the shell starts in: the server account's home. */
   cwd: string;
   env: NodeJS.ProcessEnv;
   /** Combined stdout + stderr bytes kept per command. The rest is dropped. */

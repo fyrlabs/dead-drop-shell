@@ -7,7 +7,7 @@ import { DeadDropError, generateWorkspaceSecret } from '@fyrlabs/dead-drop/proto
 import { parseRuntimeConfig, type RuntimeConfig } from '@fyrlabs/dead-drop/runtime';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { ShellAgent } from '../src/agent.js';
+import { ShellServer } from '../src/server.js';
 import { ShellClient, type RemoteSession } from '../src/client.js';
 import { parseShellConfig, type ShellConfig } from '../src/config.js';
 import { JobLedger } from '../src/ledger.js';
@@ -55,11 +55,11 @@ function shellConfig(runtime: RuntimeConfig, fields: Record<string, unknown> = {
   );
 }
 
-async function startAgent(fields: Record<string, unknown> = {}): Promise<ShellAgent> {
+async function startServer(fields: Record<string, unknown> = {}): Promise<ShellServer> {
   const runtime = runtimeConfig('vm');
-  const agent = await ShellAgent.start({ runtime, shell: shellConfig(runtime, fields), home });
-  cleanup.push(() => agent.stop());
-  return agent;
+  const server = await ShellServer.start({ runtime, shell: shellConfig(runtime, fields), home });
+  cleanup.push(() => server.stop());
+  return server;
 }
 
 async function startClient(peerId = 'laptop'): Promise<ShellClient> {
@@ -83,7 +83,7 @@ const run = async (session: RemoteSession, command: string, jobId?: string) =>
 
 describe('ddshell over the filesystem transport', () => {
   it('starts in the home directory and keeps cd and exported variables', async () => {
-    await startAgent();
+    await startServer();
     const session = (await startClient()).session('vm');
 
     const first = await run(session, 'pwd');
@@ -98,7 +98,7 @@ describe('ddshell over the filesystem transport', () => {
   });
 
   it('keeps sessions independent and runs them concurrently', async () => {
-    await startAgent();
+    await startServer();
     const client = await startClient();
     const one = client.session('vm');
     const two = client.session('vm');
@@ -116,7 +116,7 @@ describe('ddshell over the filesystem transport', () => {
   });
 
   it('returns stdout, stderr, exit code and duration', async () => {
-    await startAgent();
+    await startServer();
     const session = (await startClient()).session('vm');
     const result = await run(session, 'echo out; echo err >&2; false');
     expect(result).toMatchObject({ out: 'out\n', err: 'err\n', exitCode: 1, state: 'completed' });
@@ -126,7 +126,7 @@ describe('ddshell over the filesystem transport', () => {
   });
 
   it('passes through output that imitates the protocol', async () => {
-    await startAgent();
+    await startServer();
     const session = (await startClient()).session('vm');
     const imitation = '\\n0123abcd:0:/etc:0123abcd\\n{"v":1,"op":"close"}';
     const result = await run(session, `printf '${imitation}'`);
@@ -135,7 +135,7 @@ describe('ddshell over the filesystem transport', () => {
   });
 
   it('caps output and marks it truncated', async () => {
-    await startAgent({ outputCapBytes: 64 });
+    await startServer({ outputCapBytes: 64 });
     const session = (await startClient()).session('vm');
     const result = await run(session, 'head -c 10000 /dev/zero | tr "\\0" x');
     expect(result.out).toBe('x'.repeat(64));
@@ -143,7 +143,7 @@ describe('ddshell over the filesystem transport', () => {
   });
 
   it('kills a command past its timeout and reports the session closed', async () => {
-    await startAgent({ commandTimeoutMs: 300 });
+    await startServer({ commandTimeoutMs: 300 });
     const session = (await startClient()).session('vm');
     const result = await run(session, 'sleep 30');
     expect(result).toMatchObject({ timedOut: true, sessionClosed: true, exitCode: null });
@@ -152,7 +152,7 @@ describe('ddshell over the filesystem transport', () => {
   });
 
   it('closes idle sessions and refuses to silently replace them', async () => {
-    await startAgent({ idleTimeoutMs: 200 });
+    await startServer({ idleTimeoutMs: 200 });
     const session = (await startClient()).session('vm');
     await run(session, 'cd /');
     await new Promise((resolve) => setTimeout(resolve, 600));
@@ -161,18 +161,18 @@ describe('ddshell over the filesystem transport', () => {
     await expect(readFile(join(home, 'should-not-exist'))).rejects.toThrow();
   });
 
-  it('kills session shells and their background jobs on agent shutdown', async () => {
-    const agent = await startAgent();
+  it('kills session shells and their background jobs on server shutdown', async () => {
+    const server = await startServer();
     const session = (await startClient()).session('vm');
     const background = Number((await run(session, 'sleep 30 & echo $!')).out.trim());
-    const shells = agent.sessionPids();
+    const shells = server.sessionPids();
     expect(shells).toHaveLength(1);
-    await agent.stop();
+    await server.stop();
     await waitFor(() => !isAlive(background) && shells.every((pid) => !isAlive(pid)));
   });
 
   it('refuses a controller that is not allowed, by identity', async () => {
-    await startAgent();
+    await startServer();
     const intruder = (await startClient('mallory')).session('vm');
     const error = await intruder
       .exec('touch pwned', { timeoutMs: 10_000 })
@@ -182,7 +182,7 @@ describe('ddshell over the filesystem transport', () => {
   });
 
   it('replays a duplicate completed job without running it again', async () => {
-    await startAgent();
+    await startServer();
     const session = (await startClient()).session('vm');
     const jobId = randomUUID();
     const first = await run(session, 'echo ran >> count; wc -l < count', jobId);
@@ -193,7 +193,7 @@ describe('ddshell over the filesystem transport', () => {
     expect(await readFile(join(home, 'count'), 'utf8')).toBe('ran\n');
   });
 
-  it('reports a job interrupted by an agent crash as unknown and never reruns it', async () => {
+  it('reports a job interrupted by a server crash as unknown and never reruns it', async () => {
     // What a crash leaves behind: `running` persisted, no result.
     const jobId = randomUUID();
     const ledger = new JobLedger<JobResult>(join(root, 'vm-state', 'ddshell-ledger'), 60_000);
@@ -206,7 +206,7 @@ describe('ddshell over the filesystem transport', () => {
       startedAt: Date.now(),
     });
 
-    await startAgent();
+    await startServer();
     const session = (await startClient()).session('vm');
     const response = await session.exec('touch reran', { jobId, timeoutMs: 10_000 });
     expect(response.state).toBe('unknown');
@@ -214,7 +214,7 @@ describe('ddshell over the filesystem transport', () => {
   });
 
   it('does not let one controller replay another controller’s job', async () => {
-    await startAgent({ allowControllers: ['laptop', 'desktop'] });
+    await startServer({ allowControllers: ['laptop', 'desktop'] });
     const jobId = randomUUID();
     await run((await startClient('laptop')).session('vm'), 'echo secret-output', jobId);
     const other = (await startClient('desktop')).session('vm');
@@ -229,25 +229,25 @@ describe('ddshell over the filesystem transport', () => {
     cleanup.push(async () => {
       delete process.env.DEADDROP_SECRET;
     });
-    await startAgent();
+    await startServer();
     const session = (await startClient()).session('vm');
     expect((await run(session, 'echo "${DEADDROP_SECRET:-absent}"')).out).toBe('absent\n');
   });
 
   it('closes a one-shot session after its command', async () => {
-    const agent = await startAgent();
+    const server = await startServer();
     const session = (await startClient()).session('vm');
     const result = completed(await session.exec('echo once', { close: true, timeoutMs: 10_000 }));
     expect(result).toMatchObject({ out: 'once\n', sessionClosed: true });
-    expect(agent.sessionPids()).toEqual([]);
+    expect(server.sessionPids()).toEqual([]);
   });
 
-  it('answers a request queued while the agent was down', async () => {
+  it('answers a request queued while the server was down', async () => {
     const client = await startClient();
     const session = client.session('vm');
     const pending = session.exec('echo queued', { timeoutMs: 15_000 });
     await new Promise((resolve) => setTimeout(resolve, 300));
-    await startAgent();
+    await startServer();
     const outcome = await pending.then(completed, (error: unknown) => error);
     expect(outcome).toMatchObject({ out: 'queued\n' });
   });
