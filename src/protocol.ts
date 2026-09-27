@@ -1,7 +1,12 @@
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
 
-/** Request channel. A breaking change to the shapes below gets a new channel, not a flag. */
-export const SHELL_CHANNEL = 'shell.v1';
+/**
+ * Registered as service `shell`, method `v1`, which dead-drop names channel
+ * `shell.v1`. A breaking change to the shapes below gets `v2`, not a flag.
+ */
+export const SHELL_SERVICE = 'shell';
+export const SHELL_METHOD = 'v1';
+export const SHELL_CHANNEL = `${SHELL_SERVICE}.${SHELL_METHOD}`;
 
 export interface ExecRequest {
   v: 1;
@@ -13,6 +18,8 @@ export interface ExecRequest {
   command: string;
   /** Set on a session's first command. Without it an unknown session is an error, not a new shell. */
   open?: boolean;
+  /** Close the session after this command. One round trip for a one-shot `exec`. */
+  close?: boolean;
 }
 
 export interface CloseRequest {
@@ -46,6 +53,19 @@ export interface JobResult {
   replayed: boolean;
 }
 
+/**
+ * The session this command named no longer exists: it idled out, exited, or
+ * the agent restarted. The command was not run. Silently opening a fresh shell
+ * in the home directory instead would run it somewhere the user did not `cd` to.
+ */
+export interface SessionLost {
+  jobId: string;
+  state: 'session_lost';
+  message: string;
+}
+
+export type ExecResponse = JobResult | SessionLost;
+
 export interface CloseResult {
   closed: boolean;
 }
@@ -61,13 +81,7 @@ function bad(message: string): never {
   throw new DeadDropError('BAD_REQUEST', message);
 }
 
-export function parseRequest(payload: Uint8Array): ShellRequest {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(Buffer.from(payload).toString('utf8'));
-  } catch {
-    bad('shell request is not valid JSON');
-  }
+export function parseRequest(raw: unknown): ShellRequest {
   if (typeof raw !== 'object' || raw === null) bad('shell request must be an object');
   const source = raw as Record<string, unknown>;
   if (source.v !== 1) bad(`unsupported shell protocol version ${String(source.v)}`);
@@ -85,13 +99,6 @@ export function parseRequest(payload: Uint8Array): ShellRequest {
     jobId: source.jobId,
     command: source.command,
     ...(source.open === true ? { open: true } : {}),
+    ...(source.close === true ? { close: true } : {}),
   };
-}
-
-export function encodeJson(value: unknown): Uint8Array {
-  return Buffer.from(JSON.stringify(value));
-}
-
-export function decodeJson<T>(payload: Uint8Array): T {
-  return JSON.parse(Buffer.from(payload).toString('utf8')) as T;
 }

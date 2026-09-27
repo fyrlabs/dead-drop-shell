@@ -96,6 +96,7 @@ export class ShellSession {
 
   private readonly child: ChildProcessWithoutNullStreams;
   private queue: Promise<unknown> = Promise.resolve();
+  private pending = 0;
   private onExit: ((code: number | null) => void) | undefined;
   private exitCode: number | null = null;
   readonly exited: Promise<void>;
@@ -131,9 +132,20 @@ export class ShellSession {
 
   /** Runs `command`, queued behind any command already running in this session. */
   run(command: string): Promise<CommandResult> {
-    const next = this.queue.then(() => this.execute(command));
+    this.pending += 1;
+    const next = this.queue
+      .then(() => this.execute(command))
+      .finally(() => {
+        this.pending -= 1;
+        this.lastUsed = performance.now();
+      });
     this.queue = next.catch(() => undefined);
     return next;
+  }
+
+  /** A command is queued or running. An idle sweep must leave this session alone. */
+  get busy(): boolean {
+    return this.pending > 0;
   }
 
   /** Kills the shell and everything in its process group. */
