@@ -1,0 +1,56 @@
+name: Release
+
+# Publishing a GitHub release publishes to npm; pushing a tag does not.
+# workflow_dispatch retries a release whose run failed, without re-tagging.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag to publish from, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      - name: Configure git for the transport test
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+      - run: npm run verify
+      - name: Check the tag matches package.json
+        env:
+          REF: ${{ inputs.ref || github.ref_name }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "${REF#refs/tags/}" != "v$version" ]; then
+            echo "tag ${REF#refs/tags/} does not match package.json version $version"
+            exit 1
+          fi
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already published, skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
