@@ -85,7 +85,7 @@ ddshell exec vm -- uptime
 ddshell vm
 ```
 
-Add `--debug` to see the job id, the time spent on the agent and the full round trip for each command.
+Add `--debug` to see the job id, the time spent on the target machine and the full round trip for each command.
 
 ## Removing a controller
 

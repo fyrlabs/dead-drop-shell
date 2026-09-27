@@ -13,6 +13,8 @@ vm:/srv/app$ git status
 vm:/srv/app$ cat package.json
 ```
 
+Two machines are involved. The **target machine** is the one you connect to; it runs `ddshell agent`. Your machine runs the `ddshell` client and is called the controller in config files.
+
 It is slow on purpose. Over GitHub every command is a push, a poll and another push, so a round trip takes seconds. What you get for that is a shell on a machine with no inbound port, no VPN, no tunnel and no broker.
 
 ## What it is not
@@ -85,7 +87,7 @@ The config file is `--config`, else `$DDSHELL_CONFIG`, else `~/.deaddrop/ddshell
 
 ## What each command returns
 
-stdout and stderr as bytes, the exit code, the duration on the agent, the resulting working directory, whether output was truncated at the cap (8 MiB by default, stdout and stderr combined), and a stable job id.
+stdout and stderr as bytes, the exit code, the duration on the target machine, the resulting working directory, whether output was truncated at the cap (8 MiB by default, stdout and stderr combined), and a stable job id.
 
 ## Delivery is at least once, so read this
 
@@ -99,7 +101,7 @@ A session's shell dies with the agent, on `exit`, after an idle timeout (30 minu
 
 ## Security
 
-Read [SECURITY.md](SECURITY.md) before deploying. In short: the agent's OS account is the real permission boundary, so run it as a dedicated unprivileged user. Anyone holding the workspace secret and the current key era is trusted broadly by dead-drop, so give the shell its own workspace, repository and secret. The agent checks callers against `shell.allowControllers`, which catches misconfigured peers but not a secret holder claiming a listed name. It logs job ids, exit codes and sizes, never commands or output.
+Read [SECURITY.md](SECURITY.md) before deploying. In short: the OS account running the agent on the target machine is the real permission boundary, so run it as a dedicated unprivileged user. Anyone holding the workspace secret and the current key era is trusted broadly by dead-drop, so give the shell its own workspace, repository and secret. The agent checks callers against `shell.allowControllers`, which catches misconfigured peers but not a secret holder claiming a listed name. It logs job ids, exit codes and sizes, never commands or output.
 
 ## Documentation
 

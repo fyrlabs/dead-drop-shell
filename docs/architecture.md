@@ -23,7 +23,7 @@ Both ends embed a `DeadDropRuntime` built from the same kind of config file. Not
 
 ## Sessions
 
-A session is one long-lived shell started in the agent account's home directory, in its own process group. Each command is written to its stdin as:
+A session is one long-lived shell started in the home directory of the account running the agent, in its own process group. Each command is written to its stdin as:
 
 ```sh
 __ddshell_cmd='<command, single-quoted>'

@@ -29,7 +29,7 @@ Usage:
   ddshell exec <target> [--config <file>] [--timeout <ms>] [--debug] -- <command...>
 
 Config: --config, else $DDSHELL_CONFIG, else ${DEFAULT_CONFIG_PATH}
-Exit codes (exec): the remote exit code; 124 timed out on the agent; 125 unknown
+Exit codes (exec): the remote exit code; 124 timed out on the target; 125 unknown
 outcome after an agent restart; 255 ddshell itself failed.
 `;
 
@@ -196,7 +196,7 @@ async function interactive(
       return;
     }
     io.stderr.write(
-      '\n[ddshell] phase one cannot cancel a remote command; it keeps running on the agent. Press Ctrl-C again to leave.\n',
+      '\n[ddshell] phase one cannot cancel a remote command; it keeps running on the target. Press Ctrl-C again to leave.\n',
     );
   });
 
@@ -253,7 +253,7 @@ async function send(
   } catch (error) {
     if (DeadDropError.is(error) && error.code === 'TIMEOUT') {
       note(
-        `no answer within ${options.timeoutMs}ms. Job ${jobId} may still be running on the agent, and later commands in this session wait behind it.`,
+        `no answer within ${options.timeoutMs}ms. Job ${jobId} may still be running on the target, and later commands in this session wait behind it.`,
       );
     } else {
       note(describe(error));
