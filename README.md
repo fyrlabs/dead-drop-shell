@@ -15,7 +15,7 @@ vm:/srv/app$ cat package.json
 
 Two machines are involved. The **target machine** is the one you connect to; it runs `ddshell serve`. Your machine runs the `ddshell` client and is called the controller in config files.
 
-It is slow on purpose. Over GitHub every command is a push, a poll and another push, so a round trip takes seconds. What you get for that is a shell on a machine with no inbound port, no VPN, no tunnel and no broker.
+It is slow on purpose. Over GitHub every command is a push, a poll and another push, so a round trip takes seconds: a median of about 12 s in one measured setup, see [Latency](docs/github-setup.md#latency). What you get for that is a shell on a machine with no inbound port, no VPN, no tunnel and no broker.
 
 ## What it is not
 
