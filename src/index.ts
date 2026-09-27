@@ -1,0 +1,18 @@
+export { ShellAgent, assertSupportedPlatform, type AgentOptions } from './agent.js';
+export {
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  RemoteSession,
+  ShellClient,
+  resolveTarget,
+  type ClientOptions,
+} from './client.js';
+export {
+  DEFAULT_CONFIG_PATH,
+  loadConfig,
+  parseShellConfig,
+  type LoadedConfig,
+  type ShellConfig,
+} from './config.js';
+export { JobLedger, type JobRecord, type JobState } from './ledger.js';
+export * from './protocol.js';
+export { ShellSession, type CommandResult, type SessionOptions } from './session.js';
