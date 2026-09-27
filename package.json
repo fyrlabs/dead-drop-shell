@@ -1,7 +1,7 @@
 {
   "name": "@fyrlabs/dead-drop-shell",
   "version": "0.1.0",
-  "description": "Line-oriented remote shell over dead-drop, for machines you cannot reach over SSH",
+  "description": "A remote shell over dead-drop: an alternative to SSH that needs no inbound port, VPN or tunnel",
   "type": "module",
   "license": "Apache-2.0",
   "keywords": [
