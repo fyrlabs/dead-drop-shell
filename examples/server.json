@@ -9,7 +9,11 @@
       "transports": [
         {
           "use": "github",
-          "config": { "repo": "your-org/vm-shell-drop", "workDir": "~/.deaddrop/vm-shell-git" }
+          "config": {
+            "repo": "your-org/vm-shell-drop",
+            "workDir": "~/.deaddrop/vm-shell-git",
+            "freshnessMs": 1000
+          }
         }
       ],
       "polling": { "minIntervalMs": 1000, "maxIntervalMs": 15000 },

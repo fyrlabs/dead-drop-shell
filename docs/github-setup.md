@@ -8,9 +8,11 @@ Expect a round trip of several seconds per command. That is normal operation, no
 
 Measured with both peers on one Mac, a private GitHub repository and polling of 1 to 5 s: six `exec` round trips took 6.7, 7.1, 10.8, 13.7, 15.5 and 19.8 s, a median of about 12 s. The command itself took 3 to 9 ms of that; the rest is transport.
 
-Most of the transport time is dead-drop's git freshness window, not GitHub. The git transport reuses a fetch for up to `freshnessMs` (default 5000) before fetching again, and a round trip waits on that twice: once for the request, once for the answer. Over a local bare repository with the same polling, a round trip took 6.1 to 11.2 s at the default and 1.0 to 2.2 s with `"freshnessMs": 100`.
+Part of that is dead-drop's git freshness window. The git transport reuses a fetch for up to `freshnessMs` (default 5000) before fetching again, and a round trip waits on that twice: once for the request, once for the answer. Over a local bare repository, a round trip took 6.1 to 11.2 s at the default and 1.0 to 2.2 s with `"freshnessMs": 100`.
 
-You can set `freshnessMs` in the `github` transport's `config` on both machines. Lower values mean more fetches against GitHub. This has not been tested over GitHub, so its effect on latency and on GitHub's rate limits there is unknown. Try it before relying on it.
+Over GitHub the window matters less, because pushes, fetches and polling backoff add time the window does not control. In one session with polling of 1 to 5 s, six round trips took 11.8 to 24.8 s (median about 21 s) at the default and 12.4 to 16.1 s (median about 14 s) with `"freshnessMs": 1000`. A bare `git fetch` from GitHub took 0.6 to 0.9 s, so values much below 1000 mostly add fetches. The examples set 1000.
+
+A lower window costs git fetches, not REST API calls: the github transport uses the API only at startup and for an occasional rate-limit check, and the REST quota did not move during these runs. GitHub returned no 403 or 429 in about a dozen round trips at 1000; an always-on server over days at that value is untested. While idle, the server polls every 15 s, longer than the window, so idle traffic is the same at any window below that.
 
 ## 1. Create a dedicated private repository
 
