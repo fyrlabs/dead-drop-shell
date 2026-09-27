@@ -37,6 +37,10 @@ export function resolveTarget(shell: ShellConfig, target: string): string {
  * agent still sees the configured peer id as the caller's identity.
  */
 export class ShellClient {
+  // dead-drop unrefs its poll and timeout timers, and over git or GitHub nothing
+  // else holds the event loop open, so Node would exit mid-request.
+  private readonly keepAlive = setInterval(() => undefined, 1 << 30);
+
   private constructor(
     readonly runtime: DeadDropRuntime,
     private readonly workspace: Workspace,
@@ -62,6 +66,7 @@ export class ShellClient {
   }
 
   async stop(): Promise<void> {
+    clearInterval(this.keepAlive);
     await this.runtime.stop();
   }
 }

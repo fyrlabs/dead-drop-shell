@@ -121,8 +121,9 @@ export class ShellAgent {
       [SHELL_METHOD]: (input, context) => agent.handle(input, context),
     });
     const interval = Math.max(10, Math.min(options.shell.idleTimeoutMs / 4, 30_000));
+    // Deliberately not unref'd: dead-drop unrefs its own poll timers, and over
+    // git or GitHub nothing else holds the event loop open between polls.
     agent.sweeper = setInterval(() => void agent.sweep(), interval);
-    agent.sweeper.unref();
     agent.runtime.logger.info('shell agent ready', {
       workspace: agent.workspace.name,
       peerId: agent.workspace.identity,
