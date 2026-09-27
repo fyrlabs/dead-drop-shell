@@ -15,6 +15,7 @@ npm run verify
 
 - `test/session.test.ts` runs the session suite once per shell found among `/bin/sh`, `/bin/bash` and `/bin/dash`. Install `dash` to cover the strictest one.
 - `test/integration.test.ts` starts real server and controller runtimes over dead-drop's filesystem transport in a temporary folder. No network, no GitHub.
+- `test/process.test.ts` runs the built `ddshell serve` and `ddshell exec` as separate processes over dead-drop's git transport, against a local bare repository. It needs `git` on the `PATH`. It catches what in-process tests cannot, such as a process exiting because nothing holds the event loop open. `npm test` builds first, so it never runs a stale `dist/`.
 - Anything that touches delivery (duplicates, restarts, timeouts) needs a test that proves a command does not run twice.
 
 ## Commits
