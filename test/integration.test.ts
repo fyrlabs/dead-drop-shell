@@ -107,12 +107,14 @@ describe('ddshell over the filesystem transport', () => {
     const second = await run(two, 'pwd; echo "${WHO:-unset}"');
     expect(second.out).toBe(`${home}\nunset\n`);
 
-    const order: string[] = [];
-    await Promise.all([
-      run(one, 'sleep 1').then(() => order.push('slow')),
-      run(two, 'true').then(() => order.push('fast')),
+    // One can only finish after two runs, so this deadlocks if sessions are serialised.
+    const flag = join(home, 'go');
+    const [waited, touched] = await Promise.all([
+      run(one, `until [ -e '${flag}' ]; do sleep 0.05; done; echo waited`),
+      run(two, `touch '${flag}'`),
     ]);
-    expect(order).toEqual(['fast', 'slow']);
+    expect(waited.out).toBe('waited\n');
+    expect(touched.exitCode).toBe(0);
   });
 
   it('returns stdout, stderr, exit code and duration', async () => {
