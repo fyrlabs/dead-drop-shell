@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep runtime logs out of the client's output unless `--debug` is passed.
 - Make Ctrl-D leave an interactive session reliably, including while a remote command is pending.
 - Make a second Ctrl-C abandon a pending local wait immediately while leaving the remote command's outcome unchanged.
 - Make the GitHub examples safer for always-on use by restoring the 5-second fetch freshness default and backing idle polling off to 30 seconds.

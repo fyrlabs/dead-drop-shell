@@ -48,7 +48,7 @@ export class ShellClient {
 
   static async start(options: ClientOptions): Promise<ShellClient> {
     const runtime = new DeadDropRuntime({
-      config: { ...options.runtime, logLevel: options.debug ? 'debug' : 'warn' },
+      config: { ...options.runtime, logLevel: options.debug ? 'debug' : 'silent' },
       sessionId: randomBytes(4).toString('hex'),
       logFormat: 'pretty',
       ...(options.baseDir ? { baseDir: options.baseDir } : {}),
