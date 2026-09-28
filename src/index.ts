@@ -15,4 +15,5 @@ export {
 } from './config.js';
 export { JobLedger, type JobRecord, type JobState } from './ledger.js';
 export * from './protocol.js';
+export { DEAD_DROP_VERSION, VERSION } from './version.js';
 export { ShellSession, type CommandResult, type SessionOptions } from './session.js';

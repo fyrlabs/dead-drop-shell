@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
@@ -15,12 +14,9 @@ import {
 } from './client.js';
 import { DEFAULT_CONFIG_PATH, loadConfig } from './config.js';
 import type { ExecResponse } from './protocol.js';
+import { VERSION } from './version.js';
 
-export const VERSION = (
-  JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-    version: string;
-  }
-).version;
+export { VERSION };
 
 const USAGE = `ddshell ${VERSION}: a line-oriented remote shell over dead-drop. Not SSH, no TTY.
 
@@ -28,11 +24,13 @@ Usage:
   ddshell serve [--config <file>]
   ddshell <target> [--config <file>] [--timeout <ms>] [--debug]
   ddshell exec <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug] -- <command...>
+  ddshell ping <target>[,<target>...] [--config <file>] [--timeout <ms>] [--count <n>]
 
 Config: --config, else $DDSHELL_CONFIG, else ${DEFAULT_CONFIG_PATH}
 Exit codes (exec): the remote exit code; 124 timed out on the target; 125 unknown
 outcome after a server restart; 255 ddshell itself failed. With several targets,
 each output line is prefixed with its target and the exit code is the highest.
+Exit codes (ping): 0 every ping answered; 1 some did not; 255 ddshell failed.
 `;
 
 export interface Io {
@@ -59,6 +57,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       options: {
         config: { type: 'string' },
         timeout: { type: 'string' },
+        count: { type: 'string' },
         debug: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
         version: { type: 'boolean', short: 'v', default: false },
@@ -84,6 +83,11 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     note('--timeout must be a positive whole number of milliseconds');
     return 2;
   }
+  const count = values.count === undefined ? 1 : Number(values.count);
+  if (!Number.isInteger(count) || count <= 0) {
+    note('--count must be a positive whole number');
+    return 2;
+  }
   const configPath = values.config ?? io.env.DDSHELL_CONFIG ?? DEFAULT_CONFIG_PATH;
 
   try {
@@ -97,9 +101,12 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       if (target === undefined || rest.length === 0) {
         throw usage('exec needs a target and a command after --');
       }
-      const targets = target.split(',');
-      if (targets.includes('')) throw usage(`empty target in "${target}"`);
-      return await exec(io, config, [...new Set(targets)], rest.join(' '), timeoutMs, values.debug);
+      return await exec(io, config, targets(target), rest.join(' '), timeoutMs, values.debug);
+    }
+    if (command === 'ping') {
+      if (target === undefined) throw usage('ping needs a target');
+      if (rest.length > 0) throw usage(`unexpected argument "${rest[0]}"`);
+      return await ping(io, config, targets(target), { timeoutMs, count, debug: values.debug });
     }
     if (target !== undefined) throw usage(`unexpected argument "${target}"`);
     return await interactive(io, config, command!, timeoutMs, values.debug);
@@ -107,6 +114,13 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     note(describe(error));
     return 255;
   }
+}
+
+/** `a,b,a` is `a` and `b`. */
+function targets(list: string): string[] {
+  const names = list.split(',');
+  if (names.includes('')) throw usage(`empty target in "${list}"`);
+  return [...new Set(names)];
 }
 
 function usage(message: string): DeadDropError {
@@ -145,22 +159,102 @@ async function exec(
 ): Promise<number> {
   const client = await ShellClient.start({ ...config, debug });
   try {
-    if (targets.length === 1) {
-      return await execOne(io, client, config, targets[0]!, command, timeoutMs, debug);
-    }
-    // Results arrive whole, so each target's output is printed as one block.
-    const codes = await Promise.all(
-      targets.map(async (target) => {
-        const captured = capture(io);
-        const code = await execOne(captured, client, config, target, command, timeoutMs, debug);
-        captured.flush(`${target}: `);
-        return code;
-      }),
+    return await fanOut(io, targets, (out, target) =>
+      execOne(out, client, config, target, command, timeoutMs, debug),
     );
-    return Math.max(...codes);
   } finally {
     await client.stop();
   }
+}
+
+/**
+ * Runs `task` for every target at once and returns the highest exit code. One
+ * target writes straight through. Several are each held back and printed as one
+ * block when they finish, every line prefixed with the target's name.
+ */
+async function fanOut(
+  io: Io,
+  targets: string[],
+  task: (io: Io, target: string) => Promise<number>,
+): Promise<number> {
+  if (targets.length === 1) return task(io, targets[0]!);
+  const codes = await Promise.all(
+    targets.map(async (target) => {
+      const captured = capture(io);
+      try {
+        return await task(captured, target);
+      } finally {
+        captured.flush(`${target}: `);
+      }
+    }),
+  );
+  return Math.max(...codes);
+}
+
+async function ping(
+  io: Io,
+  config: Loaded,
+  targets: string[],
+  options: { timeoutMs: number; count: number; debug: boolean },
+): Promise<number> {
+  const client = await ShellClient.start({ ...config, debug: options.debug });
+  try {
+    return await fanOut(io, targets, (out, target) =>
+      pingOne(out, client, resolveTarget(config.shell, target), options),
+    );
+  } finally {
+    await client.stop();
+  }
+}
+
+/** Pings one after another, like ping(8), so each round trip is measured alone. */
+async function pingOne(
+  io: Io,
+  client: ShellClient,
+  peer: string,
+  options: { timeoutMs: number; count: number },
+): Promise<number> {
+  const times: number[] = [];
+  for (let sent = 0; sent < options.count; sent += 1) {
+    try {
+      const { result, roundTripMs } = await client.ping(peer, { timeoutMs: options.timeoutMs });
+      times.push(roundTripMs);
+      const about = result
+        ? `ddshell ${result.version}, dead-drop ${result.deadDropVersion}, up ${duration(result.uptimeMs)}`
+        : 'an older ddshell without ping';
+      io.stdout.write(`${about}, round trip ${roundTripMs} ms\n`);
+    } catch (error) {
+      const reason =
+        DeadDropError.is(error) && error.code === 'TIMEOUT'
+          ? `no answer within ${options.timeoutMs}ms`
+          : describe(error);
+      io.stderr.write(`[ddshell] ${reason}\n`);
+    }
+  }
+  if (options.count > 1) {
+    const sorted = [...times].sort((a, b) => a - b);
+    const middle = sorted.length / 2;
+    const median =
+      sorted.length % 2 === 1
+        ? sorted[Math.floor(middle)]!
+        : Math.round((sorted[middle - 1]! + sorted[middle]!) / 2);
+    const spread =
+      sorted.length === 0
+        ? ''
+        : `, round trip min ${sorted[0]} ms, median ${median} ms, max ${sorted.at(-1)} ms`;
+    io.stdout.write(`${times.length}/${options.count} answered${spread}\n`);
+  }
+  return times.length === options.count ? 0 : 1;
+}
+
+function duration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  if (seconds < 60) return `${seconds}s`;
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
 
 async function execOne(

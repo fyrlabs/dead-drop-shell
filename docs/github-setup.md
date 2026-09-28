@@ -97,7 +97,7 @@ ddshell exec vm -- uptime
 ddshell vm
 ```
 
-Add `--debug` to see the job id, the time spent on the target machine and the full round trip for each command.
+Add `--debug` to see the job id, the time spent on the target machine and the full round trip for each command. `ddshell ping vm --count 5` measures the transport alone: five round trips that run nothing, with min, median and max.
 
 ## Removing a controller
 

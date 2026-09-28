@@ -21,6 +21,8 @@ Both ends embed a `DeadDropRuntime` built from the same kind of config file. Not
 4. Otherwise the server finds the session keyed by (identity, sessionId), or opens one if `open` is set, or answers `session_lost`.
 5. `running` is written to the ledger, the command runs, and `completed` is written with the result before the answer goes back.
 
+`{ v: 1, op: "ping" }` passes the same identity check, then answers `{ version, deadDropVersion, uptimeMs }` without touching sessions or the ledger. A 0.1.0 server refuses it with `BAD_REQUEST`, which the client reports as an older server that is up.
+
 ## Sessions
 
 A session is one long-lived shell started in the home directory of the account running the server, in its own process group. Each command is written to its stdin as:

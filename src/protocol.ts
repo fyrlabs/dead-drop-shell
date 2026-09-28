@@ -28,7 +28,13 @@ export interface CloseRequest {
   sessionId: string;
 }
 
-export type ShellRequest = ExecRequest | CloseRequest;
+/** Asks whether the server is up and which versions it runs. Runs nothing. */
+export interface PingRequest {
+  v: 1;
+  op: 'ping';
+}
+
+export type ShellRequest = ExecRequest | CloseRequest | PingRequest;
 
 export interface JobResult {
   jobId: string;
@@ -70,6 +76,15 @@ export interface CloseResult {
   closed: boolean;
 }
 
+export interface PingResult {
+  /** ddshell on the server. */
+  version: string;
+  /** dead-drop on the server. */
+  deadDropVersion: string;
+  /** Milliseconds since `ddshell serve` started. */
+  uptimeMs: number;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Job and session ids become file names on the server, so only UUIDs are accepted. */
@@ -85,6 +100,7 @@ export function parseRequest(raw: unknown): ShellRequest {
   if (typeof raw !== 'object' || raw === null) bad('shell request must be an object');
   const source = raw as Record<string, unknown>;
   if (source.v !== 1) bad(`unsupported shell protocol version ${String(source.v)}`);
+  if (source.op === 'ping') return { v: 1, op: 'ping' };
   if (!isJobId(source.sessionId)) bad('sessionId must be a UUID');
 
   if (source.op === 'close') return { v: 1, op: 'close', sessionId: source.sessionId };

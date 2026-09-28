@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `ddshell ping <target>` checks a server is up and shows its versions, uptime and round trip. `--count` repeats it and prints min, median and max.
 - `ddshell exec a,b,c -- <command>` runs a command on several machines at once, prefixes each output line with its machine, and exits with the worst exit code.
 - The server example now uses the plain git transport, so the server machine needs only git and a token for the drop repository, not `gh`.
 - Keep runtime logs out of the client's output unless `--debug` is passed.

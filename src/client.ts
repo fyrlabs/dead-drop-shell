@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 
+import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
 import { DeadDropRuntime, type RuntimeConfig, type Workspace } from '@fyrlabs/dead-drop/runtime';
 
 import type { ShellConfig } from './config.js';
@@ -9,6 +11,8 @@ import {
   type CloseResult,
   type ExecRequest,
   type ExecResponse,
+  type PingRequest,
+  type PingResult,
 } from './protocol.js';
 
 export interface ClientOptions {
@@ -63,6 +67,30 @@ export class ShellClient {
   /** Opens a session handle. Nothing is sent until the first command. */
   session(peer: string): RemoteSession {
     return new RemoteSession(this.workspace, peer);
+  }
+
+  /**
+   * One round trip that runs nothing. `result` is undefined for a server older
+   * than `ping`: it refuses the request, which still proves it is up.
+   */
+  async ping(
+    peer: string,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<{ result: PingResult | undefined; roundTripMs: number }> {
+    const started = performance.now();
+    const request: PingRequest = { v: 1, op: 'ping' };
+    let result: PingResult | undefined;
+    try {
+      result = await this.workspace.call<PingResult>(peer, SHELL_CHANNEL, request, {
+        timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      // Only the server's own request parser answers BAD_REQUEST, and 0.1.0's
+      // refuses a ping before it gets as far as naming the operation.
+      if (!(DeadDropError.is(error) && error.code === 'BAD_REQUEST')) throw error;
+    }
+    return { result, roundTripMs: Math.round(performance.now() - started) };
   }
 
   async stop(): Promise<void> {

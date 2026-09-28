@@ -20,8 +20,10 @@ import {
   type ExecRequest,
   type ExecResponse,
   type JobResult,
+  type PingResult,
 } from './protocol.js';
 import { ShellSession } from './session.js';
+import { DEAD_DROP_VERSION, VERSION } from './version.js';
 
 export interface ServerOptions {
   runtime: RuntimeConfig;
@@ -65,6 +67,7 @@ export class ShellServer {
   private readonly allowed: Set<string>;
   private readonly home: string;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly startedAt = performance.now();
   private sweeper: NodeJS.Timeout | undefined;
   private stopping = false;
 
@@ -150,7 +153,7 @@ export class ShellServer {
   private async handle(
     input: unknown,
     context: RequestContext,
-  ): Promise<ExecResponse | CloseResult> {
+  ): Promise<ExecResponse | CloseResult | PingResult> {
     // `identity` is the caller's configured peer id. `from` is only where the
     // reply goes and must never decide access.
     if (!this.allowed.has(context.identity)) {
@@ -166,6 +169,13 @@ export class ShellServer {
       throw new DeadDropError('UNSUPPORTED', 'shell server is shutting down', { retryable: true });
     }
     const request = parseRequest(input);
+    if (request.op === 'ping') {
+      return {
+        version: VERSION,
+        deadDropVersion: DEAD_DROP_VERSION,
+        uptimeMs: Math.round(performance.now() - this.startedAt),
+      };
+    }
     if (request.op === 'close') {
       const key = sessionKey(context.identity, request.sessionId);
       const session = this.sessions.get(key);

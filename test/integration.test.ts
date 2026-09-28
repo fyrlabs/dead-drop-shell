@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { DeadDropError, generateWorkspaceSecret } from '@fyrlabs/dead-drop/protocol';
-import { parseRuntimeConfig, type RuntimeConfig } from '@fyrlabs/dead-drop/runtime';
+import {
+  DeadDropRuntime,
+  parseRuntimeConfig,
+  type RuntimeConfig,
+} from '@fyrlabs/dead-drop/runtime';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { ShellServer } from '../src/server.js';
@@ -242,6 +246,32 @@ describe('ddshell over the filesystem transport', () => {
     const result = completed(await session.exec('echo once', { close: true, timeoutMs: 10_000 }));
     expect(result).toMatchObject({ out: 'once\n', sessionClosed: true });
     expect(server.sessionPids()).toEqual([]);
+  });
+
+  it('pings a server without opening a session', async () => {
+    const server = await startServer();
+    const { result, roundTripMs } = await (await startClient()).ping('vm', { timeoutMs: 10_000 });
+    expect(result).toMatchObject({
+      version: expect.any(String),
+      deadDropVersion: expect.any(String),
+    });
+    expect(result!.uptimeMs).toBeGreaterThanOrEqual(0);
+    expect(roundTripMs).toBeGreaterThanOrEqual(0);
+    expect(server.sessionPids()).toEqual([]);
+  });
+
+  it('treats a server older than ping as up', async () => {
+    // What 0.1.0 answers: its parser wants a session id before it reads the operation.
+    const old = new DeadDropRuntime({ config: runtimeConfig('old') });
+    await old.start();
+    cleanup.push(() => old.stop());
+    old.defaultWorkspace().service('shell', {
+      v1: () => {
+        throw new DeadDropError('BAD_REQUEST', 'sessionId must be a UUID');
+      },
+    });
+    const { result } = await (await startClient()).ping('old', { timeoutMs: 10_000 });
+    expect(result).toBeUndefined();
   });
 
   it('answers a request queued while the server was down', async () => {

@@ -18,6 +18,7 @@ npm run format      # prettier --write
 | `src/session.ts`  | `ShellSession`: one long-lived child shell, nonce-delimited command trailer, output cap, timeouts |
 | `src/ledger.ts`   | `JobLedger`: one JSON file per job id, atomic writes, `running` becomes `unknown` on open         |
 | `src/protocol.ts` | `shell.v1` request and response types, `parseRequest`                                             |
+| `src/version.ts`  | `VERSION` and `DEAD_DROP_VERSION`, read from the package manifests                                |
 | `src/config.ts`   | `shell` config section, defaults, `loadConfig`                                                    |
 | `src/server.ts`   | `ShellServer`: embedded runtime, authorisation, sessions, ledger, idle sweep                      |
 | `src/client.ts`   | `ShellClient`, `RemoteSession`                                                                    |

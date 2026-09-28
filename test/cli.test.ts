@@ -221,6 +221,54 @@ describe('ddshell cli', () => {
     expect(streams.err()).toMatch(/empty target/);
   });
 
+  it('ping reports the server versions, uptime and round trip', async () => {
+    const streams = io();
+    expect(await main(['ping', 'vm', '--config', controllerConfig], streams)).toBe(0);
+    const deadDrop = JSON.parse(
+      await readFile(
+        new URL('../node_modules/@fyrlabs/dead-drop/package.json', import.meta.url),
+        'utf8',
+      ),
+    ).version;
+    expect(streams.out()).toMatch(
+      new RegExp(`^ddshell ${VERSION}, dead-drop ${deadDrop}, up \\d+s, round trip \\d+ ms\n$`),
+    );
+  });
+
+  it('ping --count sends several and summarises them', async () => {
+    const streams = io();
+    expect(await main(['ping', 'vm', '--count', '3', '--config', controllerConfig], streams)).toBe(
+      0,
+    );
+    const lines = streams.out().trimEnd().split('\n');
+    expect(lines).toHaveLength(4);
+    expect(lines[3]).toMatch(/^3\/3 answered, round trip min \d+ ms, median \d+ ms, max \d+ ms$/);
+  });
+
+  it('ping exits 1 when a target does not answer', async () => {
+    const streams = io();
+    const code = await main(
+      ['ping', 'vm,ghost', '--config', controllerConfig, '--timeout', '1000'],
+      streams,
+    );
+    expect(code).toBe(1);
+    expect(streams.out()).toMatch(/^vm: ddshell /);
+    expect(streams.err()).toBe('ghost: [ddshell] no answer within 1000ms\n');
+  });
+
+  it('ping reports a controller the server refuses', async () => {
+    const streams = io();
+    const intruder = await writeConfig('mallory', join(root, 'secret'));
+    expect(await main(['ping', 'vm', '--config', intruder], streams)).toBe(1);
+    expect(streams.err()).toMatch(/UNAUTHORIZED: peer "mallory"/);
+  });
+
+  it('rejects a bad count before starting anything', async () => {
+    const streams = io();
+    expect(await main(['ping', 'vm', '--count', '0'], streams)).toBe(2);
+    expect(streams.err()).toMatch(/--count/);
+  });
+
   it('runs an interactive session from piped input, keeping cd', async () => {
     const streams = io('cd /\npwd\necho "$HOME"\n');
     const code = await main(['vm', '--config', controllerConfig], streams);
