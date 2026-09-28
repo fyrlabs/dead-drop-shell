@@ -1,6 +1,6 @@
 # Setting up a VM over GitHub
 
-This connects your machine (peer `laptop`) to a VM (peer `vm`) through a private GitHub repository. Neither machine needs an inbound port. Both need outbound HTTPS to github.com, Node.js 20.11+, `git` and `gh`.
+This connects your machine (peer `laptop`) to a VM (peer `vm`) through a private GitHub repository. Neither machine needs an inbound port. Both need outbound HTTPS to github.com, Node.js 20.11+ and `git`. Only your machine needs `gh`: the VM uses dead-drop's plain `git` transport, which needs nothing but git credentials for the one repository.
 
 Expect a round trip of several seconds per command. That is normal operation, not a fault.
 
@@ -32,17 +32,19 @@ Every command you run through ddshell runs as this account. Give it only the fil
 
 ## 3. Authenticate git on both machines
 
-On the VM, as the `ddshell` account, prefer a fine-grained personal access token scoped to this one repository with **Contents: read and write**, so a leaked VM token cannot reach anything else:
+On the VM, give the `ddshell` account a fine-grained personal access token scoped to this one repository with **Contents: read and write**, so a leaked VM token cannot reach anything else. Store it for git and check that git can reach the repository without a prompt:
 
 ```bash
 sudo -iu ddshell
-gh auth login --with-token < token.txt && rm token.txt
-gh auth setup-git
+git config --global credential.helper store
+git ls-remote https://github.com/your-org/vm-shell-drop.git
 ```
 
-On your machine, `gh auth login` followed by `gh auth setup-git` is enough if your account can push to the repository.
+Enter your GitHub username and the token as the password once. Git saves it in `~/.git-credentials` as plain text, readable only by `ddshell`. The server runs git non-interactively, so if `ls-remote` still prompts afterwards, the server will fail to fetch.
 
-`gh auth setup-git` is the step that is easy to forget. Without it `gh` is logged in but plain `git push`, which dead-drop uses, is not.
+An SSH deploy key with write access also works: use the SSH URL (`git@github.com:your-org/vm-shell-drop.git`) as the `remote` in step 5, and run `ssh -T git@github.com` once as `ddshell` to accept the host key. This path has not been tested.
+
+On your machine, `gh auth login` followed by `gh auth setup-git` is enough if your account can push to the repository. `gh auth setup-git` is the step that is easy to forget. Without it `gh` is logged in but plain `git push`, which dead-drop uses, is not.
 
 ## 4. Generate the secret and move it out of band
 
@@ -65,7 +67,7 @@ On both machines:
 npm install -g @fyrlabs/dead-drop-shell
 ```
 
-On the VM, copy [examples/server.json](../examples/server.json) to `/home/ddshell/.deaddrop/ddshell.json` and set `repo`. On your machine, copy [examples/controller.json](../examples/controller.json) to `~/.deaddrop/ddshell.json` and set the same `repo`. The peer ids must match: the controller's `peerId` must appear in the server's `allowControllers`, and the controller's `targets` must point at the server's `peerId`.
+On the VM, copy [examples/server.json](../examples/server.json) to `/home/ddshell/.deaddrop/ddshell.json` and set `remote` to the repository's clone URL. On your machine, copy [examples/controller.json](../examples/controller.json) to `~/.deaddrop/ddshell.json` and set `repo` to the same repository as `owner/name`. The two transports read and write the same branch, so a `git` server and a `github` controller talk to each other; keep `branch` and `prefix` at their defaults on both, or set them to the same values. The peer ids must match: the controller's `peerId` must appear in the server's `allowControllers`, and the controller's `targets` must point at the server's `peerId`.
 
 Try the server in the foreground first:
 
@@ -82,11 +84,11 @@ sudo systemctl enable --now ddshell-server
 journalctl -u ddshell-server -f
 ```
 
-The unit runs `ddshell` through `/usr/bin/env`, so it must be on systemd's `PATH`. If `npm install -g` put it somewhere else (nvm, a user prefix), write the absolute path into `ExecStart`.
+The unit runs `ddshell` through `/usr/bin/env`, so it must be on systemd's `PATH`. If `npm install -g` put it somewhere else (nvm, a user prefix), write absolute paths into `ExecStart`, for example `ExecStart=/usr/bin/node /usr/lib/node_modules/@fyrlabs/dead-drop-shell/dist/bin.js serve --config /home/ddshell/.deaddrop/ddshell.json`. `readlink -f "$(npm prefix -g)/bin/ddshell"` prints the second path.
 
 `systemctl stop` sends SIGTERM; the server kills every session shell and its background jobs before exiting. A restart loses every session, and a command that was running at that moment is reported as unknown.
 
-The unit has not been tested on a real Linux host yet.
+A server set up this way (git transport, token in the credential store, systemd unit with absolute paths) has run end to end on a Linux VM. The unit exactly as shipped, with `/usr/bin/env`, and a reboot of the VM have not been tested.
 
 ## 7. Connect
 

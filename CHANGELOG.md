@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The server example now uses the plain git transport, so the server machine needs only git and a token for the drop repository, not `gh`.
 - Keep runtime logs out of the client's output unless `--debug` is passed.
 - Make Ctrl-D leave an interactive session reliably, including while a remote command is pending.
 - Make a second Ctrl-C abandon a pending local wait immediately while leaving the remote command's outcome unchanged.

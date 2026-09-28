@@ -8,9 +8,9 @@
       "secrets": ["${file:~/.deaddrop/ddshell.secret}"],
       "transports": [
         {
-          "use": "github",
+          "use": "git",
           "config": {
-            "repo": "your-org/vm-shell-drop",
+            "remote": "https://github.com/your-org/vm-shell-drop.git",
             "workDir": "~/.deaddrop/vm-shell-git",
             "freshnessMs": 5000
           }

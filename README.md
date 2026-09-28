@@ -36,7 +36,7 @@ Node.js 20.11 or newer, on both machines. The server needs a POSIX system (Linux
 npm install -g @fyrlabs/dead-drop-shell
 ```
 
-This brings in `@fyrlabs/dead-drop` as a dependency. The GitHub transport also needs `git` and an authenticated `gh` on both machines.
+This brings in `@fyrlabs/dead-drop` as a dependency. Over GitHub, the server needs only `git` with credentials for the drop repository; the controller also needs an authenticated `gh`.
 
 ## Try it locally in one minute
 
