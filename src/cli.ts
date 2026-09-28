@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
+import { Writable } from 'node:stream';
 import { parseArgs } from 'node:util';
 
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
@@ -26,11 +27,12 @@ const USAGE = `ddshell ${VERSION}: a line-oriented remote shell over dead-drop. 
 Usage:
   ddshell serve [--config <file>]
   ddshell <target> [--config <file>] [--timeout <ms>] [--debug]
-  ddshell exec <target> [--config <file>] [--timeout <ms>] [--debug] -- <command...>
+  ddshell exec <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug] -- <command...>
 
 Config: --config, else $DDSHELL_CONFIG, else ${DEFAULT_CONFIG_PATH}
 Exit codes (exec): the remote exit code; 124 timed out on the target; 125 unknown
-outcome after a server restart; 255 ddshell itself failed.
+outcome after a server restart; 255 ddshell itself failed. With several targets,
+each output line is prefixed with its target and the exit code is the highest.
 `;
 
 export interface Io {
@@ -95,7 +97,9 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       if (target === undefined || rest.length === 0) {
         throw usage('exec needs a target and a command after --');
       }
-      return await exec(io, config, target, rest.join(' '), timeoutMs, values.debug);
+      const targets = target.split(',');
+      if (targets.includes('')) throw usage(`empty target in "${target}"`);
+      return await exec(io, config, [...new Set(targets)], rest.join(' '), timeoutMs, values.debug);
     }
     if (target !== undefined) throw usage(`unexpected argument "${target}"`);
     return await interactive(io, config, command!, timeoutMs, values.debug);
@@ -134,23 +138,80 @@ type Loaded = Awaited<ReturnType<typeof loadConfig>>;
 async function exec(
   io: Io,
   config: Loaded,
-  target: string,
+  targets: string[],
   command: string,
   timeoutMs: number,
   debug: boolean,
 ): Promise<number> {
   const client = await ShellClient.start({ ...config, debug });
   try {
-    const session = client.session(resolveTarget(config.shell, target));
-    const response = await send(io, session, command, { timeoutMs, debug, close: true });
-    if (response === undefined) return 255;
-    if (response.state === 'unknown') return 125;
-    if (response.state === 'session_lost') return 255;
-    if (response.timedOut) return 124;
-    return response.exitCode ?? 255;
+    if (targets.length === 1) {
+      return await execOne(io, client, config, targets[0]!, command, timeoutMs, debug);
+    }
+    // Results arrive whole, so each target's output is printed as one block.
+    const codes = await Promise.all(
+      targets.map(async (target) => {
+        const captured = capture(io);
+        const code = await execOne(captured, client, config, target, command, timeoutMs, debug);
+        captured.flush(`${target}: `);
+        return code;
+      }),
+    );
+    return Math.max(...codes);
   } finally {
     await client.stop();
   }
+}
+
+async function execOne(
+  io: Io,
+  client: ShellClient,
+  config: Loaded,
+  target: string,
+  command: string,
+  timeoutMs: number,
+  debug: boolean,
+): Promise<number> {
+  const session = client.session(resolveTarget(config.shell, target));
+  const response = await send(io, session, command, { timeoutMs, debug, close: true });
+  if (response === undefined) return 255;
+  if (response.state === 'unknown') return 125;
+  if (response.state === 'session_lost') return 255;
+  if (response.timedOut) return 124;
+  return response.exitCode ?? 255;
+}
+
+/** An `Io` that holds output back until `flush` writes it with every line prefixed. */
+function capture(io: Io): Io & { flush(prefix: string): void } {
+  const buffer = () => {
+    const chunks: Buffer[] = [];
+    const stream = new Writable({
+      write(chunk: Buffer, _encoding, done) {
+        chunks.push(chunk);
+        done();
+      },
+    });
+    return { stream, text: () => Buffer.concat(chunks).toString() };
+  };
+  const stdout = buffer();
+  const stderr = buffer();
+  const prefixed = (text: string, prefix: string) =>
+    text === ''
+      ? ''
+      : text
+          .replace(/\n$/, '')
+          .split('\n')
+          .map((line) => `${prefix}${line}\n`)
+          .join('');
+  return {
+    ...io,
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    flush(prefix) {
+      io.stdout.write(prefixed(stdout.text(), prefix));
+      io.stderr.write(prefixed(stderr.text(), prefix));
+    },
+  };
 }
 
 async function interactive(

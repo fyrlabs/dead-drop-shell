@@ -157,6 +157,70 @@ describe('ddshell cli', () => {
     expect(code).toBe(3);
   });
 
+  it('exec fans out to several servers, prefixing output and exiting with the worst code', async () => {
+    const otherHome = join(root, 'home-two');
+    await mkdir(otherHome);
+    await writeFile(join(otherHome, 'marker'), 'two\n');
+    const other = await ShellServer.start({
+      ...(await loadConfig(await writeConfig('vm2', join(root, 'secret')))),
+      home: otherHome,
+    });
+    try {
+      const streams = io();
+      const code = await main(
+        ['exec', 'vm,vm2,vm', '--config', controllerConfig, '--', 'echo out; cat marker || exit 7'],
+        streams,
+      );
+      expect(code).toBe(7);
+      expect(streams.out().split('\n').sort()).toEqual(['', 'vm2: out', 'vm2: two', 'vm: out']);
+      expect(streams.err()).toMatch(/^vm: cat: .*marker/);
+    } finally {
+      await other.stop();
+    }
+  });
+
+  it('exec runs on every target at once', async () => {
+    const otherHome = join(root, 'home-two');
+    await mkdir(otherHome);
+    const other = await ShellServer.start({
+      ...(await loadConfig(await writeConfig('vm2', join(root, 'secret')))),
+      home: otherHome,
+    });
+    try {
+      // Each target waits for the other's mark, so this deadlocks if targets run in turn.
+      const marks = join(root, 'marks');
+      await mkdir(marks);
+      const command = `touch '${marks}'/"$(basename "$HOME")"; until [ -e '${marks}/home' ] && [ -e '${marks}/home-two' ]; do sleep 0.05; done`;
+      const streams = io();
+      expect(
+        await main(
+          ['exec', 'vm,vm2', '--config', controllerConfig, '--timeout', '5000', '--', command],
+          streams,
+        ),
+      ).toBe(0);
+    } finally {
+      await other.stop();
+    }
+  });
+
+  it('exec reports a target that never answers as a ddshell failure', async () => {
+    const streams = io();
+    const code = await main(
+      ['exec', 'vm,ghost', '--config', controllerConfig, '--timeout', '1000', '--', 'true'],
+      streams,
+    );
+    expect(code).toBe(255);
+    expect(streams.err()).toMatch(/^ghost: \[ddshell\] no answer within 1000ms/);
+  });
+
+  it('exec rejects an empty target in a list', async () => {
+    const streams = io();
+    expect(
+      await main(['exec', 'vm,,vm2', '--config', controllerConfig, '--', 'true'], streams),
+    ).toBe(255);
+    expect(streams.err()).toMatch(/empty target/);
+  });
+
   it('runs an interactive session from piped input, keeping cd', async () => {
     const streams = io('cd /\npwd\necho "$HOME"\n');
     const code = await main(['vm', '--config', controllerConfig], streams);

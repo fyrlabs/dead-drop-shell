@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `ddshell exec a,b,c -- <command>` runs a command on several machines at once, prefixes each output line with its machine, and exits with the worst exit code.
 - The server example now uses the plain git transport, so the server machine needs only git and a token for the drop repository, not `gh`.
 - Keep runtime logs out of the client's output unless `--debug` is passed.
 - Make Ctrl-D leave an interactive session reliably, including while a remote command is pending.

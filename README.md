@@ -56,17 +56,18 @@ For a real VM over GitHub, follow [docs/github-setup.md](docs/github-setup.md).
 
 ## Commands
 
-| Command                                                            | What it does                                                                                                       |
-| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| `ddshell serve [--config <file>]`                                  | Runs the server until SIGINT or SIGTERM.                                                                           |
-| `ddshell <target> [--timeout <ms>] [--debug]`                      | Interactive session. Each line runs in one remote shell, so `cd` and `export` carry over. Ctrl-D ends it.          |
-| `ddshell exec <target> [--timeout <ms>] [--debug] -- <command...>` | Runs one command in a fresh session and exits with its exit code. Arguments are joined with spaces, as `ssh` does. |
+| Command                                                               | What it does                                                                                                                                           |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ddshell serve [--config <file>]`                                     | Runs the server until SIGINT or SIGTERM.                                                                                                               |
+| `ddshell <target> [--timeout <ms>] [--debug]`                         | Interactive session. Each line runs in one remote shell, so `cd` and `export` carry over. Ctrl-D ends it.                                              |
+| `ddshell exec <target> [--timeout <ms>] [--debug] -- <command...>`    | Runs one command in a fresh session and exits with its exit code. Arguments are joined with spaces, as `ssh` does.                                     |
+| `ddshell exec <a>,<b>,... [--timeout <ms>] [--debug] -- <command...>` | Runs the command on every listed target at once. Each target's output is printed as one block when it finishes, every line prefixed with `<target>: `. |
 
 The config file is `--config`, else `$DDSHELL_CONFIG`, else `~/.deaddrop/ddshell.json`. `<target>` is looked up in `shell.targets`; an unmapped name is used as the server's peer id directly. `--timeout` is how long the client waits for an answer (default 120000). `--debug` shows runtime logs and a per-command line with the job id, server-side duration and round trip.
 
 In an interactive session, Ctrl-D closes the remote session and exits. While a command is pending, the first Ctrl-C warns that phase one cannot cancel the remote command; a second Ctrl-C or Ctrl-D abandons the local wait and exits immediately. The command may continue on the target.
 
-`exec` exit codes: the remote exit code, `124` when the command hit the server's `commandTimeoutMs`, `125` when the outcome is unknown (below), `255` when ddshell itself failed.
+`exec` exit codes: the remote exit code, `124` when the command hit the server's `commandTimeoutMs`, `125` when the outcome is unknown (below), `255` when ddshell itself failed. With several targets, `exec` exits with the highest code among them, so any failure shows up as a non-zero exit.
 
 ## What each command returns
 
