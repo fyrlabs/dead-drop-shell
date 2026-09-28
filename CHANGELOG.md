@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `ddshell check` tests a config before you rely on it: it parses, the secret file is private, the server's shell and ledger work, every transport answers, and each target is announcing itself.
 - `ddshell ping <target>` checks a server is up and shows its versions, uptime and round trip. `--count` repeats it and prints min, median and max.
 - `ddshell exec a,b,c -- <command>` runs a command on several machines at once, prefixes each output line with its machine, and exits with the worst exit code.
 - The server example now uses the plain git transport, so the server machine needs only git and a token for the drop repository, not `gh`.

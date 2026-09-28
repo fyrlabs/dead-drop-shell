@@ -22,6 +22,7 @@ npm run format      # prettier --write
 | `src/config.ts`   | `shell` config section, defaults, `loadConfig`                                                    |
 | `src/server.ts`   | `ShellServer`: embedded runtime, authorisation, sessions, ledger, idle sweep                      |
 | `src/client.ts`   | `ShellClient`, `RemoteSession`                                                                    |
+| `src/check.ts`    | `ddshell check`: config, secret file modes, server shell and ledger, transports, target beacons   |
 | `src/cli.ts`      | argument parsing, interactive loop, `exec`, exit codes                                            |
 | `test/`           | unit tests plus integration tests over dead-drop's filesystem transport                           |
 

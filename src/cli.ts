@@ -5,6 +5,7 @@ import { parseArgs } from 'node:util';
 
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
 
+import { check } from './check.js';
 import { ShellServer } from './server.js';
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
@@ -25,12 +26,14 @@ Usage:
   ddshell <target> [--config <file>] [--timeout <ms>] [--debug]
   ddshell exec <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug] -- <command...>
   ddshell ping <target>[,<target>...] [--config <file>] [--timeout <ms>] [--count <n>]
+  ddshell check [--config <file>] [--debug]
 
 Config: --config, else $DDSHELL_CONFIG, else ${DEFAULT_CONFIG_PATH}
 Exit codes (exec): the remote exit code; 124 timed out on the target; 125 unknown
 outcome after a server restart; 255 ddshell itself failed. With several targets,
 each output line is prefixed with its target and the exit code is the highest.
 Exit codes (ping): 0 every ping answered; 1 some did not; 255 ddshell failed.
+Exit codes (check): 0 nothing failed (warnings allowed); 1 something failed.
 `;
 
 export interface Io {
@@ -95,6 +98,14 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     if (command === 'serve') {
       if (target !== undefined) throw usage('serve takes no positional arguments');
       return await serve(configPath);
+    }
+    if (command === 'check') {
+      if (target !== undefined) throw usage('check takes no positional arguments');
+      const findings = await check(configPath, values.debug);
+      for (const { level, subject, message } of findings) {
+        io.stdout.write(`${level.padEnd(4)}  ${subject}: ${message}\n`);
+      }
+      return findings.some((finding) => finding.level === 'fail') ? 1 : 0;
     }
     const config = await loadConfig(configPath);
     if (command === 'exec') {

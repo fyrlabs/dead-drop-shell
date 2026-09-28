@@ -93,11 +93,12 @@ A server set up this way (git transport, token in the credential store, systemd 
 ## 7. Connect
 
 ```bash
+ddshell check
 ddshell exec vm -- uptime
 ddshell vm
 ```
 
-Add `--debug` to see the job id, the time spent on the target machine and the full round trip for each command. `ddshell ping vm --count 5` measures the transport alone: five round trips that run nothing, with min, median and max.
+`ddshell check` confirms the config, secret, transport and the server's beacon before anything is sent; run it on the server machine too. A server that started less than 30 s ago shows a warning that its beacon does not list `shell.v1` yet. Add `--debug` to see the job id, the time spent on the target machine and the full round trip for each command. `ddshell ping vm --count 5` measures the transport alone: five round trips that run nothing, with min, median and max.
 
 ## Removing a controller
 

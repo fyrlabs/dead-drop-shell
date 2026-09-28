@@ -1,4 +1,13 @@
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -31,6 +40,8 @@ async function writeConfig(peerId: string, secretFile: string): Promise<string> 
           secrets: [`\${file:${secretFile}}`],
           transports: [{ use: 'filesystem', config: { root: './store' } }],
           polling: { minIntervalMs: 20, maxIntervalMs: 100 },
+          // The first beacon predates the shell handler; the next one lists it.
+          presenceIntervalMs: 50,
         },
       ],
       shell: { allowControllers: ['laptop'], targets: { vm: 'vm' } },
@@ -267,6 +278,57 @@ describe('ddshell cli', () => {
     const streams = io();
     expect(await main(['ping', 'vm', '--count', '0'], streams)).toBe(2);
     expect(streams.err()).toMatch(/--count/);
+  });
+
+  it('check passes a working controller config', async () => {
+    let out = '';
+    const deadline = Date.now() + 3000;
+    while (!out.includes('target vm: peer vm serves') && Date.now() < deadline) {
+      const streams = io();
+      expect(await main(['check', '--config', controllerConfig], streams)).toBe(0);
+      out = streams.out();
+    }
+    expect(out).toContain(`ok    config: ${controllerConfig}: workspace shell, peer laptop\n`);
+    expect(out).toContain(`ok    secret: ${join(root, 'secret')} is readable by its owner only\n`);
+    expect(out).toContain('ok    transport: filesystem (store) can be listed\n');
+    expect(out).toMatch(/ok {4}target vm: peer vm serves shell\.v1, announced \d+s ago\n/);
+  });
+
+  it('check covers the server side of a config', async () => {
+    const streams = io();
+    expect(await main(['check', '--config', join(root, 'vm.json')], streams)).toBe(0);
+    expect(streams.out()).toContain('ok    server: shell /bin/sh is executable\n');
+    expect(streams.out()).toMatch(/ok {4}server: ledger .*ddshell-ledger can be written\n/);
+    expect(streams.out()).toContain('ok    server: allows laptop\n');
+  });
+
+  it('check fails on an unreadable config, a missing shell and a broken transport', async () => {
+    const missing = io();
+    expect(await main(['check', '--config', join(root, 'nope.json')], missing)).toBe(1);
+    expect(missing.out()).toMatch(/^fail {2}config: CONFIG_INVALID: cannot read config file/);
+
+    await writeFile(join(root, 'not-a-dir'), 'file');
+    const broken = join(root, 'broken.json');
+    const config = JSON.parse(await readFile(join(root, 'vm.json'), 'utf8'));
+    config.workspaces[0].transports[0].config.root = './not-a-dir';
+    config.shell.shell = '/no/such/shell';
+    await writeFile(broken, JSON.stringify(config));
+    const streams = io();
+    expect(await main(['check', '--config', broken], streams)).toBe(1);
+    expect(streams.out()).toContain(
+      'fail  server: shell /no/such/shell is missing or not executable\n',
+    );
+    expect(streams.out()).toMatch(/fail {2}transport: filesystem: .*ENOTDIR/);
+    expect(streams.out()).toMatch(/warn {2}target vm: peer vm has no recent beacon/);
+  });
+
+  it('check warns about a secret other accounts can read', async () => {
+    await chmod(join(root, 'secret'), 0o644);
+    const streams = io();
+    expect(await main(['check', '--config', controllerConfig], streams)).toBe(0);
+    expect(streams.out()).toContain(
+      `warn  secret: ${join(root, 'secret')} has mode 644; run chmod 600 on it\n`,
+    );
   });
 
   it('runs an interactive session from piped input, keeping cd', async () => {

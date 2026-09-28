@@ -41,7 +41,8 @@ function fail(message: string): never {
   throw new DeadDropError('CONFIG_INVALID', message);
 }
 
-function resolvePath(value: string, baseDir: string): string {
+/** `~` is the home directory; anything relative resolves against `baseDir`. */
+export function resolvePath(value: string, baseDir: string): string {
   if (value === '~' || value.startsWith('~/')) return resolve(homedir(), value.slice(2));
   return resolve(baseDir, value);
 }

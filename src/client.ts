@@ -47,7 +47,7 @@ export class ShellClient {
 
   private constructor(
     readonly runtime: DeadDropRuntime,
-    private readonly workspace: Workspace,
+    readonly workspace: Workspace,
   ) {}
 
   static async start(options: ClientOptions): Promise<ShellClient> {

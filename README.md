@@ -56,13 +56,14 @@ For a real VM over GitHub, follow [docs/github-setup.md](docs/github-setup.md).
 
 ## Commands
 
-| Command                                                               | What it does                                                                                                                                                                                               |
-| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ddshell serve [--config <file>]`                                     | Runs the server until SIGINT or SIGTERM.                                                                                                                                                                   |
-| `ddshell <target> [--timeout <ms>] [--debug]`                         | Interactive session. Each line runs in one remote shell, so `cd` and `export` carry over. Ctrl-D ends it.                                                                                                  |
-| `ddshell exec <target> [--timeout <ms>] [--debug] -- <command...>`    | Runs one command in a fresh session and exits with its exit code. Arguments are joined with spaces, as `ssh` does.                                                                                         |
-| `ddshell exec <a>,<b>,... [--timeout <ms>] [--debug] -- <command...>` | Runs the command on every listed target at once. Each target's output is printed as one block when it finishes, every line prefixed with `<target>: `.                                                     |
-| `ddshell ping <target>[,<target>...] [--count <n>] [--timeout <ms>]`  | Asks each target's server for its ddshell and dead-drop versions and uptime, and prints the round trip. Runs nothing and opens no session. `--count` sends several in turn and prints min, median and max. |
+| Command                                                               | What it does                                                                                                                                                                                                                                          |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ddshell serve [--config <file>]`                                     | Runs the server until SIGINT or SIGTERM.                                                                                                                                                                                                              |
+| `ddshell <target> [--timeout <ms>] [--debug]`                         | Interactive session. Each line runs in one remote shell, so `cd` and `export` carry over. Ctrl-D ends it.                                                                                                                                             |
+| `ddshell exec <target> [--timeout <ms>] [--debug] -- <command...>`    | Runs one command in a fresh session and exits with its exit code. Arguments are joined with spaces, as `ssh` does.                                                                                                                                    |
+| `ddshell exec <a>,<b>,... [--timeout <ms>] [--debug] -- <command...>` | Runs the command on every listed target at once. Each target's output is printed as one block when it finishes, every line prefixed with `<target>: `.                                                                                                |
+| `ddshell ping <target>[,<target>...] [--count <n>] [--timeout <ms>]`  | Asks each target's server for its ddshell and dead-drop versions and uptime, and prints the round trip. Runs nothing and opens no session. `--count` sends several in turn and prints min, median and max.                                            |
+| `ddshell check [--config <file>]`                                     | Checks a config without sending anything: it parses, its `${file:}` secrets are mode 600, a server's shell is executable and its ledger directory writable, every transport can be listed, and each target has a recent beacon that lists `shell.v1`. |
 
 The config file is `--config`, else `$DDSHELL_CONFIG`, else `~/.deaddrop/ddshell.json`. `<target>` is looked up in `shell.targets`; an unmapped name is used as the server's peer id directly. `--timeout` is how long the client waits for an answer (default 120000). `--debug` shows runtime logs and a per-command line with the job id, server-side duration and round trip.
 
@@ -70,7 +71,7 @@ In an interactive session, Ctrl-D closes the remote session and exits. While a c
 
 `exec` exit codes: the remote exit code, `124` when the command hit the server's `commandTimeoutMs`, `125` when the outcome is unknown (below), `255` when ddshell itself failed. With several targets, `exec` exits with the highest code among them, so any failure shows up as a non-zero exit.
 
-`ping` exit codes: `0` when every ping was answered, `1` when any went unanswered or was refused, `255` when ddshell itself failed.
+`ping` exit codes: `0` when every ping was answered, `1` when any went unanswered or was refused, `255` when ddshell itself failed. `check` exits `1` if any check failed; warnings alone exit `0`.
 
 ## What each command returns
 
