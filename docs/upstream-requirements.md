@@ -28,7 +28,11 @@ A controller and a long-running `ddrop start` on one machine share a peer id. dd
 
 ## Per-service concurrency
 
-Workspace `concurrency` defaults to 1, which lets one slow command hold up every other session. ddshell raises it to 8 for the whole workspace. A host should let a service declare its own concurrency.
+Workspace `concurrency` defaults to 1, which lets one slow command hold up every other session. ddshell raises it to 8 for the whole workspace, but that is not enough. In dead-drop 0.16.0 the mailbox handles each poll's requests in batches of `concurrency` and waits for the whole batch, and the next poll waits for that (dead-drop's `docs/configuration.md` documents this). So only requests listed in the same poll run together; a request that arrives on a later poll waits until every running command has finished. Over the filesystem transport both usually land in one poll; over git or GitHub, with polls seconds apart, one long command blocks every other session. The test `keeps sessions independent and runs them concurrently` deadlocks unless sessions really run in parallel, and it fails on CI for this reason. A host needs a sliding pool that keeps polling while handlers run, and should let a service declare its own concurrency.
+
+## Timers that keep the process alive
+
+dead-drop unrefs all its clock timers. Only the filesystem transport holds a ref'd handle (its `fs.watch`), so over git or GitHub an embedding process with nothing else to do exits with code 13 in the middle of a request. `ShellClient` and `ShellServer` each hold an interval of their own for this. Tests over the filesystem transport cannot catch it. A host should keep the process alive while it has pending requests or registered services, or document that the embedder must.
 
 ## Lifecycle hooks the shell needed
 
