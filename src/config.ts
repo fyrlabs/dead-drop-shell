@@ -24,6 +24,10 @@ export interface ShellConfig {
   ledgerDir: string;
   /** Server: how long finished job records are kept for replay. */
   ledgerRetentionMs: number;
+  /** Server: largest file `put` or `get` moves. */
+  transferCapBytes: number;
+  /** Server: largest piece of a file sent in one request. */
+  transferChunkBytes: number;
   /** Controller: short target names mapped to server peer ids. */
   targets: Record<string, string>;
 }
@@ -36,6 +40,9 @@ export interface LoadedConfig {
 }
 
 const MiB = 1024 * 1024;
+
+/** Base64 of this stays well under dead-drop's 64 MiB message limit. */
+export const MAX_TRANSFER_CHUNK_BYTES = 16 * MiB;
 
 function fail(message: string): never {
   throw new DeadDropError('CONFIG_INVALID', message);
@@ -95,6 +102,13 @@ export function parseShellConfig(
     fail('shell.ledgerDir must be a path');
   }
 
+  const transferChunkBytes = positive(source, 'transferChunkBytes', 4 * MiB);
+  if (!Number.isInteger(transferChunkBytes) || transferChunkBytes > MAX_TRANSFER_CHUNK_BYTES) {
+    fail(
+      `shell.transferChunkBytes must be a whole number no larger than ${MAX_TRANSFER_CHUNK_BYTES}`,
+    );
+  }
+
   return {
     ...(typeof source.workspace === 'string' ? { workspace: source.workspace } : {}),
     allowControllers: allow as string[],
@@ -107,6 +121,8 @@ export function parseShellConfig(
         ? resolvePath(source.ledgerDir, baseDir)
         : join(runtime.dataDir, 'ddshell-ledger'),
     ledgerRetentionMs: positive(source, 'ledgerRetentionMs', 24 * 60 * 60_000),
+    transferCapBytes: positive(source, 'transferCapBytes', 64 * MiB),
+    transferChunkBytes,
     targets: targets as Record<string, string>,
   };
 }

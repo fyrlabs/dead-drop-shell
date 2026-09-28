@@ -1,4 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { open, rename, rm } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
@@ -13,7 +15,11 @@ import {
   type ExecResponse,
   type PingRequest,
   type PingResult,
+  type GetChunkResult,
+  type TransferOpened,
+  type TransferRequest,
 } from './protocol.js';
+import { destination, hashFile, temporaryPath } from './transfer.js';
 
 export interface ClientOptions {
   runtime: RuntimeConfig;
@@ -28,6 +34,20 @@ export interface ClientOptions {
  * command itself. The workspace default of 30s is tuned for RPC, not builds.
  */
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+
+/** Chunk requests kept in flight at once, so a slow transport's latency overlaps. */
+const TRANSFER_WINDOW = 4;
+
+/** Tries per transfer request. Every step is idempotent on the server, so a retry is safe. */
+const TRANSFER_ATTEMPTS = 3;
+
+export interface TransferOptions {
+  /** Per request, not for the whole file. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  /** Called as chunks land, with bytes done so far and the file size. */
+  onProgress?: (done: number, total: number) => void;
+}
 
 /** Maps a target name to a server peer id. An unmapped name is taken as a peer id. */
 export function resolveTarget(shell: ShellConfig, target: string): string {
@@ -93,6 +113,140 @@ export class ShellClient {
     return { result, roundTripMs: Math.round(performance.now() - started) };
   }
 
+  /**
+   * Uploads a regular file. It lands atomically: the server writes a
+   * temporary file beside `remote` and renames it into place only once its
+   * size and sha256 match the local file's. Resolves to where it landed.
+   */
+  async put(
+    peer: string,
+    local: string,
+    remote: string,
+    options: TransferOptions = {},
+  ): Promise<TransferOpened> {
+    const handle = await open(local, 'r');
+    try {
+      const stats = await handle.stat();
+      if (!stats.isFile()) {
+        throw new DeadDropError('BAD_REQUEST', `${local} is not a regular file`);
+      }
+      const { size, sha256 } = await hashFile(handle);
+      const transferId = randomUUID();
+      const opened = await this.transfer<TransferOpened>(peer, options, {
+        v: 1,
+        op: 'put-open',
+        transferId,
+        path: remote,
+        name: basename(local),
+        size,
+        sha256,
+        mode: stats.mode & 0o777,
+      });
+      try {
+        await chunked(size, opened.chunkBytes, options, async (offset, length) => {
+          const data = Buffer.alloc(length);
+          await handle.read(data, 0, length, offset);
+          await this.transfer(peer, options, {
+            v: 1,
+            op: 'put-chunk',
+            transferId,
+            offset,
+            data: data.toString('base64'),
+          });
+        });
+        return await this.transfer<TransferOpened>(peer, options, {
+          v: 1,
+          op: 'put-commit',
+          transferId,
+        });
+      } catch (error) {
+        await this.transfer(peer, {}, { v: 1, op: 'transfer-close', transferId }).catch(
+          () => undefined,
+        );
+        throw error;
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /**
+   * Downloads a regular file into a temporary file beside `local`, checks its
+   * size and sha256 against what the server hashed when the transfer opened,
+   * and renames it into place. Resolves to where it landed.
+   */
+  async get(
+    peer: string,
+    remote: string,
+    local: string,
+    options: TransferOptions = {},
+  ): Promise<TransferOpened> {
+    const transferId = randomUUID();
+    const opened = await this.transfer<TransferOpened>(peer, options, {
+      v: 1,
+      op: 'get-open',
+      transferId,
+      path: remote,
+    });
+    try {
+      const target = await destination(local, basename(opened.path));
+      const temporary = temporaryPath(target, transferId);
+      const handle = await open(temporary, 'w+', 0o600);
+      try {
+        await chunked(opened.size, opened.chunkBytes, options, async (offset, length) => {
+          const { data } = await this.transfer<GetChunkResult>(peer, options, {
+            v: 1,
+            op: 'get-chunk',
+            transferId,
+            offset,
+            length,
+          });
+          const bytes = Buffer.from(data, 'base64');
+          await handle.write(bytes, 0, bytes.length, offset);
+        });
+        const actual = await hashFile(handle);
+        if (actual.size !== opened.size || actual.sha256 !== opened.sha256) {
+          throw new DeadDropError(
+            'SERVICE_ERROR',
+            `${opened.path} changed on the target during the transfer; ${target} was not changed`,
+          );
+        }
+        await handle.chmod(opened.mode);
+        await handle.sync();
+      } catch (error) {
+        await handle.close();
+        await rm(temporary, { force: true });
+        throw error;
+      }
+      await handle.close();
+      await rename(temporary, target);
+      return { ...opened, path: target };
+    } finally {
+      await this.transfer(peer, {}, { v: 1, op: 'transfer-close', transferId }).catch(
+        () => undefined,
+      );
+    }
+  }
+
+  private async transfer<Result>(
+    peer: string,
+    options: TransferOptions,
+    request: TransferRequest,
+  ): Promise<Result> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        // No `idempotencyKey`, for the same reason as `exec`.
+        return await this.workspace.call<Result>(peer, SHELL_CHANNEL, request, {
+          timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
+      } catch (error) {
+        const retry = attempt < TRANSFER_ATTEMPTS && DeadDropError.is(error) && error.retryable;
+        if (!retry || options.signal?.aborted) throw error;
+      }
+    }
+  }
+
   async stop(): Promise<void> {
     clearInterval(this.keepAlive);
     await this.runtime.stop();
@@ -141,4 +295,35 @@ export class RemoteSession {
     const request: CloseRequest = { v: 1, op: 'close', sessionId: this.id };
     await this.workspace.call<CloseResult>(this.peer, SHELL_CHANNEL, request, { timeoutMs });
   }
+}
+
+/**
+ * Runs `task` over `[offset, length]` pieces of a `size`-byte file, a few at
+ * once. The first failure stops new pieces from starting and is thrown.
+ */
+async function chunked(
+  size: number,
+  chunkBytes: number,
+  options: TransferOptions,
+  task: (offset: number, length: number) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  let done = 0;
+  let failed = false;
+  const worker = async () => {
+    while (next < size && !failed) {
+      const offset = next;
+      const length = Math.min(chunkBytes, size - offset);
+      next += length;
+      try {
+        await task(offset, length);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+      done += length;
+      options.onProgress?.(done, size);
+    }
+  };
+  await Promise.all(Array.from({ length: TRANSFER_WINDOW }, worker));
 }

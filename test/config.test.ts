@@ -68,6 +68,8 @@ describe('config', () => {
       commandTimeoutMs: 10 * 60_000,
       ledgerDir: '/var/lib/ddshell/ddshell-ledger',
       ledgerRetentionMs: 24 * 60 * 60_000,
+      transferCapBytes: 64 * 1024 * 1024,
+      transferChunkBytes: 4 * 1024 * 1024,
       targets: {},
     });
   });
@@ -77,6 +79,9 @@ describe('config', () => {
     [{ shell: 'bash' }, /absolute path/],
     [{ outputCapBytes: 0 }, /outputCapBytes/],
     [{ targets: { vm: 3 } }, /targets/],
+    [{ transferChunkBytes: 32 * 1024 * 1024 }, /transferChunkBytes/],
+    [{ transferChunkBytes: 1.5 }, /transferChunkBytes/],
+    [{ transferCapBytes: -1 }, /transferCapBytes/],
     [{ workspace: 'other' }, /configured workspace/],
   ])('rejects %j', (shell, message) => {
     expect(() => parseShellConfig(shell, runtime(), '/etc')).toThrow(message);

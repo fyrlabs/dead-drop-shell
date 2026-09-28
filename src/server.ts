@@ -21,8 +21,11 @@ import {
   type ExecResponse,
   type JobResult,
   type PingResult,
+  type TransferRequest,
+  type TransferResponse,
 } from './protocol.js';
 import { ShellSession } from './session.js';
+import { ServerTransfers } from './transfer.js';
 import { DEAD_DROP_VERSION, VERSION } from './version.js';
 
 export interface ServerOptions {
@@ -66,6 +69,7 @@ export class ShellServer {
   >();
   private readonly allowed: Set<string>;
   private readonly home: string;
+  private readonly transfers: ServerTransfers;
   private readonly env: NodeJS.ProcessEnv;
   private readonly startedAt = performance.now();
   private sweeper: NodeJS.Timeout | undefined;
@@ -86,6 +90,11 @@ export class ShellServer {
       Object.entries(process.env).filter(([name]) => !PRIVATE_ENV.test(name)),
     );
     this.env.HOME = this.home;
+    this.transfers = new ServerTransfers(this.home, {
+      capBytes: options.shell.transferCapBytes,
+      chunkBytes: options.shell.transferChunkBytes,
+      idleMs: options.shell.idleTimeoutMs,
+    });
   }
 
   static async start(options: ServerOptions): Promise<ShellServer> {
@@ -146,6 +155,7 @@ export class ShellServer {
     this.stopping = true;
     clearInterval(this.sweeper);
     await Promise.all([...this.sessions.values()].map((session) => session.close()));
+    await this.transfers.closeAll();
     this.sessions.clear();
     await this.runtime.stop();
   }
@@ -153,7 +163,7 @@ export class ShellServer {
   private async handle(
     input: unknown,
     context: RequestContext,
-  ): Promise<ExecResponse | CloseResult | PingResult> {
+  ): Promise<ExecResponse | CloseResult | PingResult | TransferResponse> {
     // `identity` is the caller's configured peer id. `from` is only where the
     // reply goes and must never decide access.
     if (!this.allowed.has(context.identity)) {
@@ -175,6 +185,9 @@ export class ShellServer {
         deadDropVersion: DEAD_DROP_VERSION,
         uptimeMs: Math.round(performance.now() - this.startedAt),
       };
+    }
+    if (request.op !== 'exec' && request.op !== 'close') {
+      return this.transfer(context.identity, request);
     }
     if (request.op === 'close') {
       const key = sessionKey(context.identity, request.sessionId);
@@ -297,6 +310,35 @@ export class ShellServer {
     return result;
   }
 
+  /**
+   * File transfer runs outside sessions and the ledger: every step is
+   * idempotent, so a duplicate is answered again rather than deduplicated.
+   * Like commands, paths and contents are never logged.
+   */
+  private async transfer(identity: string, request: TransferRequest): Promise<TransferResponse> {
+    const { transferId } = request;
+    switch (request.op) {
+      case 'put-open':
+        return this.transfers.putOpen(identity, request);
+      case 'put-chunk':
+        return this.transfers.putChunk(identity, request);
+      case 'put-commit': {
+        const opened = await this.transfers.putCommit(identity, transferId);
+        this.runtime.logger.info('file received', { identity, transferId, bytes: opened.size });
+        return opened;
+      }
+      case 'get-open': {
+        const opened = await this.transfers.getOpen(identity, request);
+        this.runtime.logger.info('file sending', { identity, transferId, bytes: opened.size });
+        return opened;
+      }
+      case 'get-chunk':
+        return this.transfers.getChunk(identity, request);
+      case 'transfer-close':
+        return this.transfers.close(identity, transferId);
+    }
+  }
+
   private unknown(jobId: string): JobResult {
     return {
       jobId,
@@ -323,6 +365,7 @@ export class ShellServer {
       this.runtime.logger.info('shell session closed after idle timeout', { pid: session.pid });
       await session.close();
     }
+    await this.transfers.sweep();
     await this.ledger.prune().catch((error: unknown) => {
       this.runtime.logger.warn('ledger prune failed', { error: String(error) });
     });

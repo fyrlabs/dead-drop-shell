@@ -377,6 +377,47 @@ describe('ddshell cli', () => {
     expect(await promptly(running)).toBe(0);
   });
 
+  it('cp puts, gets and relays files with target:path, as scp does', async () => {
+    const file = join(root, 'notes.txt');
+    await writeFile(file, 'remember\n');
+    const put = io();
+    expect(await main(['cp', file, 'vm:', '--config', controllerConfig], put)).toBe(0);
+    expect(put.err()).toBe('');
+    expect(await readFile(join(home, 'notes.txt'), 'utf8')).toBe('remember\n');
+
+    expect(
+      await main(['cp', 'vm:notes.txt', 'vm:copy.txt', '--config', controllerConfig], io()),
+    ).toBe(0);
+    expect(await readFile(join(home, 'copy.txt'), 'utf8')).toBe('remember\n');
+
+    const get = io();
+    const back = join(root, 'back.txt');
+    expect(
+      await main(['get', 'vm', 'copy.txt', back, '--config', controllerConfig, '--debug'], get),
+    ).toBe(0);
+    expect(await readFile(back, 'utf8')).toBe('remember\n');
+    expect(get.err()).toMatch(/vm:copy\.txt -> .*back\.txt, 9 bytes, sha256 [0-9a-f]{64}/);
+  });
+
+  it('put and get exit 1 with the reason when a copy fails', async () => {
+    const streams = io();
+    expect(await main(['get', 'vm', 'missing', root, '--config', controllerConfig], streams)).toBe(
+      1,
+    );
+    expect(streams.err()).toMatch(/vm:missing: NOT_FOUND: no such file or directory/);
+    expect(
+      await main(['put', 'vm', join(root, 'missing'), 'x', '--config', controllerConfig], io()),
+    ).toBe(1);
+  });
+
+  it('cp needs a target on one side and get takes one target', async () => {
+    const both = io();
+    expect(await main(['cp', 'a', 'b', '--config', controllerConfig], both)).toBe(255);
+    expect(both.err()).toMatch(/<target>:<path>/);
+    expect(await main(['get', 'vm,vm2', 'a', 'b', '--config', controllerConfig], io())).toBe(255);
+    expect(await main(['cp', './a:b', 'c', '--config', controllerConfig], io())).toBe(255);
+  });
+
   it('rejects a bad timeout before starting anything', async () => {
     const streams = io();
     expect(await main(['vm', '--timeout', 'soon'], streams)).toBe(2);

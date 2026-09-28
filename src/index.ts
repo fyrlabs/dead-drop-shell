@@ -5,6 +5,7 @@ export {
   ShellClient,
   resolveTarget,
   type ClientOptions,
+  type TransferOptions,
 } from './client.js';
 export {
   DEFAULT_CONFIG_PATH,

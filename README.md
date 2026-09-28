@@ -23,7 +23,8 @@ ddshell is not SSH and not a terminal emulator. Phase one does **not** support:
 
 - a PTY, terminal resize, or full-screen programs (`vim`, `top`, `less`)
 - interactive prompts, including `sudo` password prompts (every command's stdin is `/dev/null`)
-- SCP, file transfer, port forwarding, or WebSockets
+- port forwarding or WebSockets
+- copying directories (`put`, `get` and `cp` move one regular file at a time)
 - streaming output: you see a command's output when it finishes
 - cancelling a running command from the client
 - SSH protocol compatibility of any kind
@@ -63,6 +64,9 @@ For a real VM over GitHub, follow [docs/github-setup.md](docs/github-setup.md).
 | `ddshell exec <target> [--timeout <ms>] [--debug] -- <command...>`    | Runs one command in a fresh session and exits with its exit code. Arguments are joined with spaces, as `ssh` does.                                                                                                                                    |
 | `ddshell exec <a>,<b>,... [--timeout <ms>] [--debug] -- <command...>` | Runs the command on every listed target at once. Each target's output is printed as one block when it finishes, every line prefixed with `<target>: `.                                                                                                |
 | `ddshell ping <target>[,<target>...] [--count <n>] [--timeout <ms>]`  | Asks each target's server for its ddshell and dead-drop versions and uptime, and prints the round trip. Runs nothing and opens no session. `--count` sends several in turn and prints min, median and max.                                            |
+| `ddshell put <target>[,<target>...] <local-file> <remote-path>`       | Copies a file to each target. It lands atomically: the server writes a temporary file beside the destination and renames it into place only once its size and sha256 match. A remote directory as destination keeps the local file name.              |
+| `ddshell get <target> <remote-file> <local-path>`                     | Copies a file from the target, with the same sha256 check and atomic rename on this machine.                                                                                                                                                          |
+| `ddshell cp [<target>:]<file> [<target>:]<path>`                      | scp-style form of `put` and `get`: a colon before any slash marks a remote side (`vm:app/.env`, `vm:` alone is the home directory). With a target on both sides, the file goes through this machine.                                                  |
 | `ddshell check [--config <file>]`                                     | Checks a config without sending anything: it parses, its `${file:}` secrets are mode 600, a server's shell is executable and its ledger directory writable, every transport can be listed, and each target has a recent beacon that lists `shell.v1`. |
 
 The config file is `--config`, else `$DDSHELL_CONFIG`, else `~/.deaddrop/ddshell.json`. `<target>` is looked up in `shell.targets`; an unmapped name is used as the server's peer id directly. `--timeout` is how long the client waits for an answer (default 120000). `--debug` shows runtime logs and a per-command line with the job id, server-side duration and round trip.
@@ -70,6 +74,8 @@ The config file is `--config`, else `$DDSHELL_CONFIG`, else `~/.deaddrop/ddshell
 In an interactive session, Ctrl-D closes the remote session and exits. While a command is pending, the first Ctrl-C warns that phase one cannot cancel the remote command; a second Ctrl-C or Ctrl-D abandons the local wait and exits immediately. The command may continue on the target.
 
 `exec` exit codes: the remote exit code, `124` when the command hit the server's `commandTimeoutMs`, `125` when the outcome is unknown (below), `255` when ddshell itself failed. With several targets, `exec` exits with the highest code among them, so any failure shows up as a non-zero exit.
+
+`put`, `get` and `cp` exit codes: `0` when every copy landed and matched its sha256, `1` when any did not, `255` when ddshell itself failed. Remote relative paths start in the home directory of the account running the server, as with scp. Files are sent in 4 MiB pieces, four at a time, up to 64 MiB per file by default (`transferCapBytes`); a request that times out is retried twice. At a terminal, progress is shown on stderr; `--debug` prints where the file landed, its size and sha256.
 
 `ping` exit codes: `0` when every ping was answered, `1` when any went unanswered or was refused, `255` when ddshell itself failed. `check` exits `1` if any check failed; warnings alone exit `0`.
 

@@ -10,7 +10,8 @@ The machine running `ddshell serve` (the target you connect to, like the VM) exe
 
 ## What ddshell keeps and logs
 
-- The server log records job ids, caller identity, exit codes, durations and byte counts. It never records commands or output.
+- The server log records job ids, caller identity, exit codes, durations and byte counts. It never records commands or output. For file transfers it records the transfer id, caller identity and size, never paths or contents.
+- `put` can write, and `get` can read, any file the server's account can. That adds nothing an allowed controller could not already do with `cat`, but it is the same OS account boundary, so keep that account unprivileged.
 - The ledger keeps each finished command's output (not its text) for `ledgerRetentionMs`, default 24 hours, in files readable only by the account running the server.
 - Command output travels through the transport encrypted. Over GitHub, assume the ciphertext can stay in the repository's history (not verified against dead-drop's GitHub transport).
 - Child shells do not inherit `DEADDROP_*` or `DDSHELL_*` environment variables, so a secret passed to the server that way is not visible to commands. The server must read its secret file, and commands run as the same account, so an allowed controller can read that file. This is inherent, not a bug.

@@ -12,6 +12,6 @@ ddshell serve --config server.json        # terminal 1
 ddshell vm --config controller.json       # terminal 2
 ```
 
-Commands run as you, starting in your home directory. `ddshell exec vm --config controller.json -- uname -a` runs one command and exits with its exit code. `ddshell check --config controller.json` checks the setup, and `ddshell ping vm --config controller.json` asks the server for its version.
+Commands run as you, starting in your home directory. `ddshell exec vm --config controller.json -- uname -a` runs one command and exits with its exit code. `ddshell check --config controller.json` checks the setup, and `ddshell ping vm --config controller.json` asks the server for its version. `ddshell cp server.json vm:copy.json --config controller.json` copies a file to the server's home, and `ddshell get vm copy.json back.json --config controller.json` fetches it again.
 
 To move the server to another machine, replace the `filesystem` transport in both files with `github` and follow [docs/github-setup.md](../../docs/github-setup.md).

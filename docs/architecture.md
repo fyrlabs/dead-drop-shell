@@ -23,6 +23,17 @@ Both ends embed a `DeadDropRuntime` built from the same kind of config file. Not
 
 `{ v: 1, op: "ping" }` passes the same identity check, then answers `{ version, deadDropVersion, uptimeMs }` without touching sessions or the ledger. A 0.1.0 server refuses it with `BAD_REQUEST`, which the client reports as an older server that is up.
 
+## File transfer
+
+`put-open`, `put-chunk`, `put-commit`, `get-open`, `get-chunk` and `transfer-close` pass the same identity check and then bypass sessions and the ledger. Each carries a client-chosen `transferId`, scoped to the caller's identity, and each is idempotent, so a duplicate delivery or a client retry changes nothing:
+
+- `put-open` declares path, file name, size, sha256 and mode. The server resolves the path against its home, appends the name if the path is a directory, follows a symlink at the destination, checks `transferCapBytes`, and opens `.<name>.ddshell-<transferId>.tmp` (mode 0600) beside the destination. A repeated open returns the first answer, including `chunkBytes`.
+- `put-chunk` writes base64 bytes at an offset. Rewriting a piece writes the same bytes again.
+- `put-commit` hashes the whole temporary file. On a match it sets the mode, flushes, and renames it over the destination; on a mismatch it deletes it and the destination is untouched. The outcome is kept, so a repeated commit gets the same answer.
+- `get-open` opens the file, hashes it, and keeps the handle open, so a rename over the path mid-transfer does not change what is sent. The client writes pieces into its own temporary file, checks size and sha256, and renames. An edit in place during the transfer shows up as a mismatch and nothing is written.
+
+The client keeps four pieces in flight and retries retryable errors (timeouts, transport errors) up to three tries per request. Transfers live in memory: one idle past `idleTimeoutMs` is dropped with its temporary file, and after a server restart the next request for it is answered `NOT_FOUND`. A temporary file from an upload interrupted by the restart stays beside its destination.
+
 ## Sessions
 
 A session is one long-lived shell started in the home directory of the account running the server, in its own process group. Each command is written to its stdin as:
@@ -53,4 +64,4 @@ The ledger stores command output for the retention window. That is the price of 
 
 ## What is deliberately missing
 
-No streaming, cancellation, PTY, or reconnecting to a session after a server restart. These are phase four in the parent project's [application extension proposal](https://github.com/fyrlabs/dead-drop/blob/main/docs/proposals/0001-application-extensions.md). There is also no generic plugin host here; [upstream-requirements.md](upstream-requirements.md) records what one would need.
+No streaming, cancellation, PTY, directory copies, or reconnecting to a session after a server restart. These are phase four in the parent project's [application extension proposal](https://github.com/fyrlabs/dead-drop/blob/main/docs/proposals/0001-application-extensions.md). There is also no generic plugin host here; [upstream-requirements.md](upstream-requirements.md) records what one would need.
