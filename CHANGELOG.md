@@ -10,6 +10,7 @@
 - `ddshell put`, `ddshell get` and scp-style `ddshell cp vm:path local` copy files. Each copy is checked with sha256 and lands whole or not at all. Files up to 64 MiB by default, sent in pieces.
 - `-r` on `put`, `get` and `cp` copies whole directories, as `scp -r` does. Small files take one round trip each.
 - `examples/ddshell-server@.service` runs one server per person, each as their own account with their own repository and secret. See `docs/per-person.md`.
+- `ddshell unit` prints a systemd unit that runs the server by absolute paths, so it works with nvm or a user npm prefix. `--template` prints the per-person one.
 - Each controller is held to 16 live sessions and 600 requests a minute by default (`shell.maxSessions`, `shell.requestsPerMinute`). A refused command is not run.
 - The server keeps an audit log, one JSON line per session, command, file transfer and refusal, with who, exit code, duration and size, never the command, its output or paths. Set `shell.auditLog` to move it or `false` to turn it off.
 - A slow command in one session no longer holds up the other sessions over git or GitHub. This needs dead-drop 0.16.1, which is now the minimum.

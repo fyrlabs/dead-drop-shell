@@ -596,3 +596,27 @@ describe('ddshell cli', () => {
     expect(streams.err()).toMatch(/--timeout/);
   });
 });
+
+describe('ddshell unit', () => {
+  it('prints a unit that runs this node by absolute path', async () => {
+    const streams = io();
+    expect(await main(['unit', '--account', 'ddshell', '--config', 'conf.json'], streams)).toBe(0);
+    expect(streams.out()).toContain('User=ddshell\n');
+    expect(streams.out()).toMatch(
+      new RegExp(
+        `ExecStart=${process.execPath}\\S* \\S+/bin\\.js serve --config /\\S+/conf\\.json\\n`,
+      ),
+    );
+  });
+
+  it.each([
+    [['unit', '--template', '--account', 'x']],
+    [['unit', '--template', '--config', 'c.json']],
+    [['unit', 'extra']],
+    [['check', '--template']],
+  ])('refuses %j', async (argv) => {
+    const streams = io();
+    expect(await main(argv, streams)).toBe(255);
+    expect(streams.err()).toMatch(/BAD_REQUEST/);
+  });
+});

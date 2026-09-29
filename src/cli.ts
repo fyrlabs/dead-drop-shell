@@ -1,9 +1,10 @@
 import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { hostname, tmpdir, userInfo } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
@@ -20,6 +21,7 @@ import {
 import { DEFAULT_CONFIG_PATH, loadConfig } from './config.js';
 import { ensureKeyPair, formatPublicKey, generateKeyPair, writeKeyPair } from './keys.js';
 import { isSessionName, type ExecResponse, type TransferOpened } from './protocol.js';
+import { systemdUnit } from './unit.js';
 import { VERSION } from './version.js';
 
 export { VERSION };
@@ -38,6 +40,7 @@ Usage:
   ddshell check [--config <file>] [--debug]
   ddshell keygen [-f <file>] [-C <comment>] [--force] [--config <file>]
   ddshell hostkey [--config <file>]
+  ddshell unit [--account <name>] [--template] [--config <file>]
 
 Config: --config, else $DDSHELL_CONFIG, else ${DEFAULT_CONFIG_PATH}
 Exit codes (exec): the remote exit code; 124 timed out on the target; 125 unknown
@@ -54,6 +57,9 @@ Exit codes (check): 0 nothing failed (warnings allowed); 1 something failed.
 keygen writes a controller key (default: shell.key) and prints its public line,
 which goes in a server's shell.authorizedKeys. hostkey prints the server's line
 for a controller's shell.knownHosts, making the host key if needed.
+unit prints a systemd unit that runs this node and this ddshell by absolute path,
+as --account (default: you), or with --template one server per person. Without
+--config the server reads the account's own ~/.deaddrop/ddshell.json.
 `;
 
 export interface Io {
@@ -87,6 +93,8 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         file: { type: 'string', short: 'f' },
         comment: { type: 'string', short: 'C' },
         force: { type: 'boolean', default: false },
+        account: { type: 'string' },
+        template: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
         version: { type: 'boolean', short: 'v', default: false },
       },
@@ -137,6 +145,40 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     if (command === 'keygen') {
       if (target !== undefined) throw usage('keygen takes no positional arguments');
       return await keygen(io, configPath, values);
+    }
+    if (command !== 'unit' && (values.account !== undefined || values.template)) {
+      throw usage('--account and --template apply to unit only');
+    }
+    if (command === 'unit') {
+      if (target !== undefined) throw usage('unit takes no positional arguments');
+      if (values.template && values.account !== undefined) {
+        throw usage('--template runs as the instance name; leave out --account');
+      }
+      if (values.template && values.config !== undefined) {
+        throw usage("--template reads each account's own config; leave out --config");
+      }
+      const account = values.account ?? userInfo().username;
+      const node = process.execPath;
+      const bin = fileURLToPath(new URL('./bin.js', import.meta.url));
+      io.stdout.write(
+        systemdUnit({
+          node,
+          bin,
+          account,
+          template: values.template,
+          ...(values.config !== undefined ? { config: resolve(values.config) } : {}),
+        }),
+      );
+      const home = userInfo().homedir;
+      if (
+        (values.template || account !== userInfo().username) &&
+        [node, bin].some((path) => path.startsWith(`${home}/`))
+      ) {
+        note(
+          `node or ddshell is under your home directory ${home}; the server's account must be able to read it, or install both system-wide`,
+        );
+      }
+      return 0;
     }
     if (command === 'hostkey') {
       if (target !== undefined) throw usage('hostkey takes no positional arguments');
@@ -230,6 +272,7 @@ const COMMANDS = new Set([
   'check',
   'keygen',
   'hostkey',
+  'unit',
   'exec',
   'sessions',
   'ping',

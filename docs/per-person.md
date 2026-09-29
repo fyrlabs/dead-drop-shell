@@ -22,7 +22,7 @@ The steps are those of [github-setup.md](github-setup.md), once per person, with
 6. Enable her server:
 
 ```bash
-sudo cp examples/ddshell-server@.service /etc/systemd/system/
+ddshell unit --template | sudo tee /etc/systemd/system/ddshell-server@.service  # once for everyone
 sudo systemctl daemon-reload
 sudo systemctl enable --now ddshell-server@alice
 journalctl -u ddshell-server@alice -f
@@ -41,6 +41,6 @@ Then delete her repository and revoke her token. Nobody else's secret, repositor
 
 ## Caveats
 
-- The unit runs `ddshell` through `/usr/bin/env`, like the single-server unit, so it must be on systemd's `PATH`. The same fix applies: write absolute paths into `ExecStart`, see [github-setup.md](github-setup.md#6-run-the-server-under-systemd).
+- `ddshell unit --template` fixes the absolute paths of node and ddshell at the time it runs, so rerun it after upgrading or moving either; every account must be able to read both, so install them system-wide rather than under one person's home. The shipped [examples/ddshell-server@.service](../examples/ddshell-server@.service) goes through `/usr/bin/env ddshell` instead and needs `ddshell` on systemd's `PATH`.
 - The unit has not been run on a Linux machine yet: neither the template nor a reboot with several instances enabled has been tested.
 - Each server polls its own repository, so ten people means ten processes polling GitHub. At the example's idle backoff of 30 s that is about 20 fetches a minute in total when nobody is working.

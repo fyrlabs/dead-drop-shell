@@ -86,18 +86,20 @@ sudo -iu ddshell ddshell serve
 
 ## 6. Run the server under systemd
 
+`ddshell unit` prints a unit that starts the server with the absolute paths of the node and ddshell you ran it with, so it works wherever npm put them (nvm, a user prefix) and whatever `PATH` systemd has:
+
 ```bash
-sudo cp examples/ddshell-server.service /etc/systemd/system/
+ddshell unit --account ddshell | sudo tee /etc/systemd/system/ddshell-server.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now ddshell-server
 journalctl -u ddshell-server -f
 ```
 
-The unit runs `ddshell` through `/usr/bin/env`, so it must be on systemd's `PATH`. If `npm install -g` put it somewhere else (nvm, a user prefix), write absolute paths into `ExecStart`, for example `ExecStart=/usr/bin/node /usr/lib/node_modules/@fyrlabs/dead-drop-shell/dist/bin.js serve --config /home/ddshell/.deaddrop/ddshell.json`. `readlink -f "$(npm prefix -g)/bin/ddshell"` prints the second path.
+Without `--config` the server reads the account's own `~/.deaddrop/ddshell.json`. Rerun `ddshell unit` after upgrading node or moving the install, since the paths are fixed when it runs. If node or ddshell sits under your own home directory, the `ddshell` account must be able to read it; `ddshell unit` warns when that is the case. [examples/ddshell-server.service](../examples/ddshell-server.service) is the same unit going through `/usr/bin/env ddshell`, for installs where `ddshell` is on systemd's `PATH`.
 
 `systemctl stop` sends SIGTERM; the server kills every session shell and its background jobs before exiting. A restart loses every session, and a command that was running at that moment is reported as unknown.
 
-A server set up this way (git transport, token in the credential store, systemd unit with absolute paths) has run end to end on a Linux VM. The unit exactly as shipped, with `/usr/bin/env`, and a reboot of the VM have not been tested.
+A server set up this way (git transport, token in the credential store, systemd unit with absolute paths written by hand) has run end to end on a Linux VM. The unit from `ddshell unit`, the shipped `/usr/bin/env` unit, and a reboot of the VM have not been tested.
 
 To give several people a server each on the same machine, each under their own account, see [per-person.md](per-person.md).
 
