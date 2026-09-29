@@ -26,7 +26,7 @@ Never put a secret in the file. Reference it: `"secrets": ["${file:~/.deaddrop/d
 
 ## Values the server changes
 
-When the shell's workspace does not set `concurrency`, the server uses `8` instead of dead-drop's default of `1`. At `1`, one `sleep 60` would hold up every other session's commands.
+When the shell's workspace does not set `concurrency`, the server uses `8` instead of dead-drop's default of `1`. At `1`, one `sleep 60` would hold up every other session's commands. The limit is shared by every request to the server, not only commands: while eight commands are running, a ninth command, a `ping` and every chunk of a file transfer wait for one of them to finish. Raise `concurrency` on the server's workspace if people keep long commands running.
 
 ## Choosing the 8 MiB cap
 

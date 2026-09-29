@@ -1,5 +1,7 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,7 +57,8 @@ async function writeConfig(peerId: string): Promise<string> {
           polling: { minIntervalMs: 50, maxIntervalMs: 200 },
         },
       ],
-      shell: { allowControllers: ['laptop'], targets: { vm: 'vm' } },
+      // Small chunks make an upload many requests, not one.
+      shell: { allowControllers: ['laptop'], targets: { vm: 'vm' }, transferChunkBytes: 4096 },
     }),
   );
   return path;
@@ -105,4 +108,47 @@ describe('ddshell processes over the git transport', () => {
     server.kill('SIGTERM');
     expect(await exited(server)).toBe(0);
   }, 30_000);
+
+  // Up to dead-drop 0.16.0 the mailbox stopped polling while a handler ran,
+  // so one long command held up every other request to the server.
+  it('answers pings, uploads and other commands while a long command runs', async () => {
+    const serving = run(['serve', '--config', await writeConfig('vm')]);
+    server = serving.child;
+    await waitFor(() => serving.output().includes('shell server ready'), 15_000);
+    const laptop = await writeConfig('laptop');
+    const home = join(root, 'home');
+    const ddshell = async (command: string, ...args: string[]) => {
+      const started = run([command, '--config', laptop, '--timeout', '20000', ...args]);
+      const code = await exited(started.child);
+      expect(code, started.output()).toBe(0);
+      return started.output();
+    };
+
+    const long = run([
+      'exec',
+      'vm',
+      '--config',
+      laptop,
+      '--timeout',
+      '60000',
+      '--',
+      `touch started; until [ -e release ]; do sleep 0.1; done; echo released`,
+    ]);
+    await waitFor(() => existsSync(join(home, 'started')), 20_000);
+
+    expect(await ddshell('ping', 'vm')).toContain('round trip');
+    const upload = randomBytes(40_000);
+    await writeFile(join(root, 'upload.bin'), upload);
+    await ddshell('put', 'vm', join(root, 'upload.bin'), 'upload.bin');
+    expect(await readFile(join(home, 'upload.bin'))).toEqual(upload);
+    const outputs = await Promise.all(
+      ['one', 'two', 'three'].map((word) => ddshell('exec', 'vm', '--', `echo ${word}`)),
+    );
+    expect(outputs.map((output) => output.trim())).toEqual(['one', 'two', 'three']);
+    expect(long.child.exitCode).toBeNull();
+
+    await ddshell('exec', 'vm', '--', 'touch release');
+    expect(await exited(long.child), long.output()).toBe(0);
+    expect(long.output()).toContain('released');
+  }, 90_000);
 });
