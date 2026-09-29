@@ -35,6 +35,7 @@ npm run format      # prettier --write
 - Never log or persist command text. Output may be persisted in the ledger only, never logged.
 - The client must not pass `idempotencyKey` to dead-drop. The mailbox would drop a deliberate re-ask of the same job; the ledger handles duplicates.
 - A command for a session that no longer exists is answered `session_lost` and not run.
+- Never change how `namedSessionId` derives an id from a name: clients of different versions must find the same session.
 - A transferred file reaches its destination only by rename after its size and sha256 match. Every transfer step stays idempotent; that is what makes client retries safe.
 - Never hard-code the version. `VERSION` comes from `package.json`.
 - The server is POSIX only. Anything shell-specific must work under `dash`, not just `bash`.

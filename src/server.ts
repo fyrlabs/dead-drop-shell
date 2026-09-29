@@ -21,6 +21,7 @@ import {
   type ExecResponse,
   type JobResult,
   type PingResult,
+  type SessionsResult,
   type TransferRequest,
   type TransferResponse,
 } from './protocol.js';
@@ -62,7 +63,7 @@ export function assertSupportedPlatform(platform: NodeJS.Platform = process.plat
 export class ShellServer {
   readonly runtime: DeadDropRuntime;
   private readonly workspace: Workspace;
-  private readonly sessions = new Map<string, ShellSession>();
+  private readonly sessions = new Map<string, Entry>();
   private readonly inflight = new Map<
     string,
     { identity: string; result: Promise<ExecResponse> }
@@ -147,14 +148,14 @@ export class ShellServer {
 
   /** Process ids of live session shells. For tests and diagnostics. */
   sessionPids(): number[] {
-    return [...this.sessions.values()].flatMap((session) => session.pid ?? []);
+    return [...this.sessions.values()].flatMap(({ session }) => session.pid ?? []);
   }
 
   async stop(): Promise<void> {
     if (this.stopping) return;
     this.stopping = true;
     clearInterval(this.sweeper);
-    await Promise.all([...this.sessions.values()].map((session) => session.close()));
+    await Promise.all([...this.sessions.values()].map(({ session }) => session.close()));
     await this.transfers.closeAll();
     this.sessions.clear();
     await this.runtime.stop();
@@ -163,7 +164,7 @@ export class ShellServer {
   private async handle(
     input: unknown,
     context: RequestContext,
-  ): Promise<ExecResponse | CloseResult | PingResult | TransferResponse> {
+  ): Promise<ExecResponse | CloseResult | PingResult | SessionsResult | TransferResponse> {
     // `identity` is the caller's configured peer id. `from` is only where the
     // reply goes and must never decide access.
     if (!this.allowed.has(context.identity)) {
@@ -186,6 +187,7 @@ export class ShellServer {
         uptimeMs: Math.round(performance.now() - this.startedAt),
       };
     }
+    if (request.op === 'sessions') return this.list(context.identity);
     if (request.op === 'list') return this.transfers.list(request.path);
     if (request.op === 'mkdir') return this.transfers.mkdir(request);
     if (request.op !== 'exec' && request.op !== 'close') {
@@ -193,10 +195,10 @@ export class ShellServer {
     }
     if (request.op === 'close') {
       const key = sessionKey(context.identity, request.sessionId);
-      const session = this.sessions.get(key);
+      const entry = this.sessions.get(key);
       this.sessions.delete(key);
-      await session?.close();
-      return { closed: session !== undefined };
+      await entry?.session.close();
+      return { closed: entry !== undefined };
     }
     return this.exec(context.identity, request);
   }
@@ -234,7 +236,7 @@ export class ShellServer {
     }
 
     const key = sessionKey(identity, request.sessionId);
-    let session = this.sessions.get(key);
+    let session = this.sessions.get(key)?.session;
     if (session?.closed) {
       this.sessions.delete(key);
       session = undefined;
@@ -255,7 +257,12 @@ export class ShellServer {
         outputCapBytes: this.options.shell.outputCapBytes,
         commandTimeoutMs: this.options.shell.commandTimeoutMs,
       });
-      this.sessions.set(key, session);
+      this.sessions.set(key, {
+        identity,
+        sessionId: request.sessionId,
+        ...(request.name ? { name: request.name } : {}),
+        session,
+      });
       this.runtime.logger.info('shell session opened', {
         identity,
         sessionId: request.sessionId,
@@ -341,6 +348,22 @@ export class ShellServer {
     }
   }
 
+  /** Only the caller's own sessions: another controller's are not its business. */
+  private list(identity: string): SessionsResult {
+    const now = performance.now();
+    const sessions = [...this.sessions.values()]
+      .filter((entry) => entry.identity === identity && !entry.session.closed)
+      .map(({ sessionId, name, session }) => ({
+        sessionId,
+        ...(name ? { name } : {}),
+        ...(session.pid ? { pid: session.pid } : {}),
+        cwd: session.cwd,
+        idleMs: session.busy ? 0 : Math.round(now - session.lastUsed),
+        busy: session.busy,
+      }));
+    return { home: this.home, sessions };
+  }
+
   private unknown(jobId: string): JobResult {
     return {
       jobId,
@@ -360,7 +383,7 @@ export class ShellServer {
 
   private async sweep(): Promise<void> {
     const now = performance.now();
-    for (const [key, session] of this.sessions) {
+    for (const [key, { session }] of this.sessions) {
       if (session.busy) continue;
       if (!session.closed && now - session.lastUsed < this.options.shell.idleTimeoutMs) continue;
       this.sessions.delete(key);
@@ -372,6 +395,13 @@ export class ShellServer {
       this.runtime.logger.warn('ledger prune failed', { error: String(error) });
     });
   }
+}
+
+interface Entry {
+  identity: string;
+  sessionId: string;
+  name?: string;
+  session: ShellSession;
 }
 
 function sessionKey(identity: string, sessionId: string): string {

@@ -340,6 +340,60 @@ describe('ddshell cli', () => {
     expect(streams.out()).toBe(`/\n${home}\n`);
   });
 
+  it('--session keeps a named session between exec, interactive use and sessions', async () => {
+    const run = async (...args: string[]) => {
+      const streams = io();
+      // Before the arguments: anything after `--` is the remote command.
+      const code = await main(['--config', controllerConfig, ...args], streams);
+      return { code, out: streams.out(), err: streams.err() };
+    };
+    expect(await run('exec', 'vm', '--session', 'work', '--', 'cd / && export A=1')).toMatchObject({
+      code: 0,
+    });
+    expect(await run('exec', 'vm', '--session', 'work', '--', 'pwd; echo "$A"')).toMatchObject({
+      code: 0,
+      out: '/\n1\n',
+    });
+
+    const piped = io('cd "$HOME"\npwd\n');
+    expect(await main(['vm', '--session', 'work', '--config', controllerConfig], piped)).toBe(0);
+    expect(piped.out()).toBe(`${home}\n`);
+
+    const listed = await run('sessions', 'vm');
+    expect(listed.code).toBe(0);
+    const [header, row, extra] = listed.out.trimEnd().split('\n');
+    expect(header).toMatch(/^NAME +ID +PID +STATE +CWD$/);
+    expect(row).toMatch(/^work +[0-9a-f]{8} +\d+ +idle \d+s +~$/);
+    expect(extra).toBeUndefined();
+    expect(server.sessionPids()).toHaveLength(1);
+  });
+
+  it('shows a joined named session’s directory in the prompt', async () => {
+    expect(
+      await main(
+        ['exec', 'vm', '--session', 'here', '--config', controllerConfig, '--', 'cd /'],
+        io(),
+      ),
+    ).toBe(0);
+    const streams = terminalIo();
+    const running = main(['vm', '--session', 'here', '--config', controllerConfig], streams);
+    await waitFor(() => streams.out().includes('vm[here]:/$ '));
+    streams.stdin.write('\u0004');
+    expect(await promptly(running)).toBe(0);
+    expect(streams.err()).toContain('left session here running on vm');
+    expect(server.sessionPids()).toHaveLength(1);
+  });
+
+  it('rejects a bad session name and --session on other commands', async () => {
+    const bad = io();
+    expect(await main(['vm', '--session', 'a b', '--config', controllerConfig], bad)).toBe(2);
+    const misplaced = io();
+    expect(
+      await main(['ping', 'vm', '--session', 'x', '--config', controllerConfig], misplaced),
+    ).toBe(255);
+    expect(misplaced.err()).toContain('--session applies to');
+  });
+
   it('Ctrl-D closes an opened interactive session', async () => {
     const streams = terminalIo();
     const running = main(['vm', '--config', controllerConfig], streams);

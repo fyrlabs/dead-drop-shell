@@ -15,6 +15,8 @@ import {
   type ExecResponse,
   type PingRequest,
   type PingResult,
+  type SessionsRequest,
+  type SessionsResult,
   type GetChunkResult,
   type ListRequest,
   type ListResult,
@@ -23,6 +25,7 @@ import {
   type TransferOpened,
   type TreeEntry,
   type TransferRequest,
+  namedSessionId,
 } from './protocol.js';
 import { destination, hashFile, makeTree, temporaryPath, walk } from './transfer.js';
 
@@ -106,9 +109,39 @@ export class ShellClient {
     return new ShellClient(runtime, workspace);
   }
 
-  /** Opens a session handle. Nothing is sent until the first command. */
-  session(peer: string): RemoteSession {
-    return new RemoteSession(this.workspace, peer);
+  /**
+   * Opens a session handle. Nothing is sent until the first command. A named
+   * session's first command joins the live session of that name, if there is
+   * one, instead of starting a shell.
+   */
+  session(peer: string, name?: string): RemoteSession {
+    return new RemoteSession(this.workspace, peer, name);
+  }
+
+  /** The caller's live sessions on `peer`. */
+  async sessions(
+    peer: string,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<SessionsResult> {
+    const request: SessionsRequest = { v: 1, op: 'sessions' };
+    try {
+      return await this.workspace.call<SessionsResult>(peer, SHELL_CHANNEL, request, {
+        timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      if (
+        DeadDropError.is(error) &&
+        error.code === 'BAD_REQUEST' &&
+        /sessionId|unknown shell operation/.test(error.message)
+      ) {
+        throw new DeadDropError(
+          'UNSUPPORTED',
+          `${peer} runs a ddshell without session listing; upgrade it to list sessions`,
+        );
+      }
+      throw error;
+    }
   }
 
   /**
@@ -372,13 +405,16 @@ export class ShellClient {
 }
 
 export class RemoteSession {
-  readonly id = randomUUID();
+  readonly id: string;
   private opened = false;
 
   constructor(
     private readonly workspace: Workspace,
     readonly peer: string,
-  ) {}
+    readonly name?: string,
+  ) {
+    this.id = name === undefined ? randomUUID() : namedSessionId(name);
+  }
 
   /**
    * Runs one command. `jobId` is exposed so a caller that timed out can ask
@@ -395,7 +431,7 @@ export class RemoteSession {
       sessionId: this.id,
       jobId: options.jobId ?? randomUUID(),
       command,
-      ...(this.opened ? {} : { open: true }),
+      ...(this.opened ? {} : { open: true, ...(this.name ? { name: this.name } : {}) }),
       ...(options.close ? { close: true } : {}),
     };
     // No `idempotencyKey`: the mailbox would then drop a deliberate re-ask for

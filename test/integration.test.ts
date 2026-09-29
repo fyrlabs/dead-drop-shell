@@ -15,7 +15,7 @@ import { ShellServer } from '../src/server.js';
 import { ShellClient, type RemoteSession } from '../src/client.js';
 import { parseShellConfig, type ShellConfig } from '../src/config.js';
 import { JobLedger } from '../src/ledger.js';
-import type { ExecResponse, JobResult } from '../src/protocol.js';
+import { isJobId, namedSessionId, type ExecResponse, type JobResult } from '../src/protocol.js';
 import { isAlive, waitFor } from './helpers.js';
 
 let root: string;
@@ -272,6 +272,57 @@ describe('ddshell over the filesystem transport', () => {
     });
     const { result } = await (await startClient()).ping('old', { timeoutMs: 10_000 });
     expect(result).toBeUndefined();
+  });
+
+  it('joins a named session from another client and lists only the caller’s sessions', async () => {
+    await startServer({ allowControllers: ['laptop', 'ops'] });
+    const first = await startClient();
+    await run(first.session('vm', 'build'), 'cd / && export STAGE=one');
+    await run(first.session('vm'), 'true');
+
+    // A second process of the same controller finds the session by name alone.
+    const again = await startClient();
+    const joined = await run(again.session('vm', 'build'), 'pwd; echo "$STAGE"');
+    expect(joined.out).toBe('/\none\n');
+
+    // Another controller's session of the same name is its own shell.
+    const ops = await startClient('ops');
+    const theirs = await run(ops.session('vm', 'build'), 'pwd; echo "${STAGE:-unset}"');
+    expect(theirs.out).toBe(`${home}\nunset\n`);
+
+    const { home: listedHome, sessions } = await again.sessions('vm', { timeoutMs: 10_000 });
+    expect(listedHome).toBe(home);
+    expect(sessions).toHaveLength(2);
+    expect(sessions.find((entry) => entry.name === 'build')).toMatchObject({
+      sessionId: namedSessionId('build'),
+      cwd: '/',
+      busy: false,
+      pid: expect.any(Number),
+    });
+    expect(sessions.filter((entry) => entry.name === undefined)).toHaveLength(1);
+    const opsView = await ops.sessions('vm', { timeoutMs: 10_000 });
+    expect(opsView.sessions.map((entry) => entry.cwd)).toEqual([home]);
+  });
+
+  it('derives one stable UUID per session name', () => {
+    expect(namedSessionId('build')).toBe(namedSessionId('build'));
+    expect(namedSessionId('build')).not.toBe(namedSessionId('build2'));
+    expect(isJobId(namedSessionId('build'))).toBe(true);
+    expect(namedSessionId('build')).toMatch(/^.{14}8.{3}-[89ab]/);
+  });
+
+  it('reports a server without session listing as unsupported', async () => {
+    const old = new DeadDropRuntime({ config: runtimeConfig('old') });
+    await old.start();
+    cleanup.push(() => old.stop());
+    old.defaultWorkspace().service('shell', {
+      v1: () => {
+        throw new DeadDropError('BAD_REQUEST', 'sessionId must be a UUID');
+      },
+    });
+    await expect(
+      (await startClient()).sessions('old', { timeoutMs: 10_000 }),
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
   });
 
   it('answers a request queued while the server was down', async () => {

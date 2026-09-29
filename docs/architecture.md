@@ -21,6 +21,10 @@ Both ends embed a `DeadDropRuntime` built from the same kind of config file. Not
 4. Otherwise the server finds the session keyed by (identity, sessionId), or opens one if `open` is set, or answers `session_lost`.
 5. `running` is written to the ledger, the command runs, and `completed` is written with the result before the answer goes back.
 
+A named session's id is derived from its name: sha256 of `ddshell-session\0<name>`, shaped as a version 8 UUID. Every client of one controller derives the same id, so `open` on a live session joins it and on a missing one starts it, with no extra round trip. `open` also carries `name`, which the server keeps beside the session for listing.
+
+`{ v: 1, op: "sessions" }` passes the same identity check and answers `{ home, sessions }`: for each of the caller's own live sessions, its id, name, shell pid, working directory, idle time and whether a command is queued or running. Other controllers' sessions are left out.
+
 `{ v: 1, op: "ping" }` passes the same identity check, then answers `{ version, deadDropVersion, uptimeMs }` without touching sessions or the ledger. A 0.1.0 server refuses it with `BAD_REQUEST`, which the client reports as an older server that is up.
 
 ## File transfer
@@ -71,4 +75,4 @@ The ledger stores command output for the retention window. That is the price of 
 
 ## What is deliberately missing
 
-No streaming, cancellation, PTY, directory copies, or reconnecting to a session after a server restart. These are phase four in the parent project's [application extension proposal](https://github.com/fyrlabs/dead-drop/blob/main/docs/proposals/0001-application-extensions.md). There is also no generic plugin host here; [upstream-requirements.md](upstream-requirements.md) records what one would need.
+No streaming, cancellation, PTY, or reconnecting to a session after a server restart. These are phase four in the parent project's [application extension proposal](https://github.com/fyrlabs/dead-drop/blob/main/docs/proposals/0001-application-extensions.md). There is also no generic plugin host here; [upstream-requirements.md](upstream-requirements.md) records what one would need.

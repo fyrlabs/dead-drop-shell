@@ -18,7 +18,7 @@ import {
   type TreeCopy,
 } from './client.js';
 import { DEFAULT_CONFIG_PATH, loadConfig } from './config.js';
-import type { ExecResponse, TransferOpened } from './protocol.js';
+import { isSessionName, type ExecResponse, type TransferOpened } from './protocol.js';
 import { VERSION } from './version.js';
 
 export { VERSION };
@@ -27,8 +27,9 @@ const USAGE = `ddshell ${VERSION}: a line-oriented remote shell over dead-drop. 
 
 Usage:
   ddshell serve [--config <file>]
-  ddshell <target> [--config <file>] [--timeout <ms>] [--debug]
-  ddshell exec <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug] -- <command...>
+  ddshell <target> [--session <name>] [--config <file>] [--timeout <ms>] [--debug]
+  ddshell exec <target>[,<target>...] [--session <name>] [--config <file>] [--timeout <ms>] [--debug] -- <command...>
+  ddshell sessions <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug]
   ddshell ping <target>[,<target>...] [--config <file>] [--timeout <ms>] [--count <n>]
   ddshell put [-r] <target>[,<target>...] <local-file> <remote-path> [--config <file>] [--timeout <ms>] [--debug]
   ddshell get [-r] <target> <remote-file> <local-path> [--config <file>] [--timeout <ms>] [--debug]
@@ -39,7 +40,9 @@ Config: --config, else $DDSHELL_CONFIG, else ${DEFAULT_CONFIG_PATH}
 Exit codes (exec): the remote exit code; 124 timed out on the target; 125 unknown
 outcome after a server restart; 255 ddshell itself failed. With several targets,
 each output line is prefixed with its target and the exit code is the highest.
-Exit codes (ping): 0 every ping answered; 1 some did not; 255 ddshell failed.
+--session joins the live session of that name, or starts it, and leaves it
+running on exit; it closes on \`exit\` or after the server's idle timeout.
+Exit codes (ping, sessions): 0 every request answered; 1 some did not; 255 ddshell failed.
 Exit codes (put, get, cp): 0 every copy landed and matched its sha256; 1 some did
 not; 255 ddshell failed. Remote relative paths start in the target's home, as in scp.
 -r copies directories, following symbolic links; a file that fails or is skipped
@@ -72,6 +75,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         config: { type: 'string' },
         timeout: { type: 'string' },
         count: { type: 'string' },
+        session: { type: 'string' },
         debug: { type: 'boolean', default: false },
         recursive: { type: 'boolean', short: 'r', default: false },
         help: { type: 'boolean', short: 'h', default: false },
@@ -103,10 +107,18 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     note('--count must be a positive whole number');
     return 2;
   }
+  if (values.session !== undefined && !isSessionName(values.session)) {
+    note('--session must be 1 to 64 letters, digits, ".", "_" or "-"');
+    return 2;
+  }
   const configPath = values.config ?? io.env.DDSHELL_CONFIG ?? DEFAULT_CONFIG_PATH;
 
   try {
     const [command, target, ...rest] = positionals;
+    const named = command === 'exec' || !COMMANDS.has(command!);
+    if (values.session !== undefined && !named) {
+      throw usage(`--session applies to an interactive session or exec, not ${command}`);
+    }
     if (command === 'serve') {
       if (target !== undefined) throw usage('serve takes no positional arguments');
       return await serve(configPath);
@@ -124,7 +136,16 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       if (target === undefined || rest.length === 0) {
         throw usage('exec needs a target and a command after --');
       }
-      return await exec(io, config, targets(target), rest.join(' '), timeoutMs, values.debug);
+      return await exec(io, config, targets(target), rest.join(' '), {
+        timeoutMs,
+        debug: values.debug,
+        name: values.session,
+      });
+    }
+    if (command === 'sessions') {
+      if (target === undefined) throw usage('sessions needs a target');
+      if (rest.length > 0) throw usage(`unexpected argument "${rest[0]}"`);
+      return await sessions(io, config, targets(target), { timeoutMs, debug: values.debug });
     }
     if (command === 'ping') {
       if (target === undefined) throw usage('ping needs a target');
@@ -159,12 +180,19 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       });
     }
     if (target !== undefined) throw usage(`unexpected argument "${target}"`);
-    return await interactive(io, config, command!, timeoutMs, values.debug);
+    return await interactive(io, config, command!, {
+      timeoutMs,
+      debug: values.debug,
+      name: values.session,
+    });
   } catch (error) {
     note(describe(error));
     return 255;
   }
 }
+
+/** A first word that is one of these is a subcommand, not a target. */
+const COMMANDS = new Set(['serve', 'check', 'exec', 'sessions', 'ping', 'put', 'get', 'cp']);
 
 /** `a,b,a` is `a` and `b`. */
 function targets(list: string): string[] {
@@ -239,18 +267,24 @@ async function serve(configPath: string): Promise<number> {
 
 type Loaded = Awaited<ReturnType<typeof loadConfig>>;
 
+interface SessionOptions {
+  timeoutMs: number;
+  debug: boolean;
+  /** A named session is joined or started, and left running afterwards. */
+  name: string | undefined;
+}
+
 async function exec(
   io: Io,
   config: Loaded,
   targets: string[],
   command: string,
-  timeoutMs: number,
-  debug: boolean,
+  options: SessionOptions,
 ): Promise<number> {
-  const client = await ShellClient.start({ ...config, debug });
+  const client = await ShellClient.start({ ...config, debug: options.debug });
   try {
     return await fanOut(io, targets, (out, target) =>
-      execOne(out, client, config, target, command, timeoutMs, debug),
+      execOne(out, client, config, target, command, options),
     );
   } finally {
     await client.stop();
@@ -335,6 +369,45 @@ async function pingOne(
     io.stdout.write(`${times.length}/${options.count} answered${spread}\n`);
   }
   return times.length === options.count ? 0 : 1;
+}
+
+async function sessions(
+  io: Io,
+  config: Loaded,
+  targets: string[],
+  options: { timeoutMs: number; debug: boolean },
+): Promise<number> {
+  const client = await ShellClient.start({ ...config, debug: options.debug });
+  try {
+    return await fanOut(io, targets, async (out, target) => {
+      let listed;
+      try {
+        listed = await client.sessions(resolveTarget(config.shell, target), options);
+      } catch (error) {
+        out.stderr.write(`[ddshell] ${describe(error)}\n`);
+        return 1;
+      }
+      const rows = listed.sessions.map((entry) => [
+        entry.name ?? '-',
+        entry.sessionId.slice(0, 8),
+        entry.pid === undefined ? '-' : String(entry.pid),
+        entry.busy ? 'busy' : `idle ${duration(entry.idleMs)}`,
+        display(entry.cwd, listed.home),
+      ]);
+      const table = [['NAME', 'ID', 'PID', 'STATE', 'CWD'], ...rows];
+      const widths = table[0]!.map((_, column) =>
+        Math.max(...table.map((row) => row[column]!.length)),
+      );
+      for (const row of table) {
+        out.stdout.write(
+          `${row.map((cell, column) => (column === row.length - 1 ? cell : cell.padEnd(widths[column]!))).join('  ')}\n`,
+        );
+      }
+      return 0;
+    });
+  } finally {
+    await client.stop();
+  }
 }
 
 async function transfer(
@@ -454,11 +527,14 @@ async function execOne(
   config: Loaded,
   target: string,
   command: string,
-  timeoutMs: number,
-  debug: boolean,
+  { timeoutMs, debug, name }: SessionOptions,
 ): Promise<number> {
-  const session = client.session(resolveTarget(config.shell, target));
-  const response = await send(io, session, command, { timeoutMs, debug, close: true });
+  const session = client.session(resolveTarget(config.shell, target), name);
+  const response = await send(io, session, command, {
+    timeoutMs,
+    debug,
+    ...(name === undefined ? { close: true } : {}),
+  });
   if (response === undefined) return 255;
   if (response.state === 'unknown') return 125;
   if (response.state === 'session_lost') return 255;
@@ -503,13 +579,14 @@ async function interactive(
   io: Io,
   config: Loaded,
   target: string,
-  timeoutMs: number,
-  debug: boolean,
+  { timeoutMs, debug, name }: SessionOptions,
 ): Promise<number> {
   const peer = resolveTarget(config.shell, target);
   const client = await ShellClient.start({ ...config, debug });
-  let session = client.session(peer);
-  let cwd = '~';
+  let session = client.session(peer, name);
+  // A named session may be joined wherever it was left; `?` until known.
+  let cwd = name === undefined ? '~' : '?';
+  let answered = false;
   let waiting = false;
   let interrupts = 0;
   let currentAbort: AbortController | undefined;
@@ -535,11 +612,24 @@ async function interactive(
       currentAbort?.abort();
     }
   });
-  const prompt = () => {
+  const prompt = (redraw = false) => {
     if (inputClosed) return;
-    lines.setPrompt(`${target}:${cwd}$ `);
-    lines.prompt();
+    lines.setPrompt(`${target}${name === undefined ? '' : `[${name}]`}:${cwd}$ `);
+    lines.prompt(redraw);
   };
+  if (name !== undefined) {
+    // Not awaited: over GitHub a round trip takes seconds, and typing can start
+    // at once. The prompt is redrawn if the answer comes before any command's.
+    void client
+      .sessions(peer, { timeoutMs })
+      .then(({ sessions, home }) => {
+        const live = sessions.find((listed) => listed.sessionId === session.id);
+        if (answered) return;
+        cwd = live ? display(live.cwd, home) : '~';
+        if (terminal && !waiting) prompt(true);
+      })
+      .catch(() => undefined);
+  }
   lines.on('SIGINT', () => {
     if (!waiting) {
       io.stdout.write('\n');
@@ -581,8 +671,9 @@ async function interactive(
         waiting = false;
       }
       if (abandonSession) break;
+      if (response !== undefined) answered = true;
       if (response?.state === 'session_lost') {
-        session = client.session(peer);
+        session = client.session(peer, name);
         cwd = '~';
         io.stderr.write(
           '[ddshell] a new session will start in the home directory. Re-enter the command.\n',
@@ -599,7 +690,13 @@ async function interactive(
     }
   } finally {
     lines.close();
-    if (!abandonSession && !sessionEnded) await session.close().catch(() => undefined);
+    if (name !== undefined) {
+      if (terminal && !sessionEnded) {
+        io.stderr.write(`[ddshell] left session ${name} running on ${target}\n`);
+      }
+    } else if (!abandonSession && !sessionEnded) {
+      await session.close().catch(() => undefined);
+    }
     await client.stop();
   }
   return status;

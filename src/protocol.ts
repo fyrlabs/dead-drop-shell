@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
 
 /**
@@ -20,6 +22,8 @@ export interface ExecRequest {
   open?: boolean;
   /** Close the session after this command. One round trip for a one-shot `exec`. */
   close?: boolean;
+  /** The session's name, recorded when `open` starts it, so `sessions` can show it. */
+  name?: string;
 }
 
 export interface CloseRequest {
@@ -32,6 +36,12 @@ export interface CloseRequest {
 export interface PingRequest {
   v: 1;
   op: 'ping';
+}
+
+/** Lists the caller's own live sessions. Runs nothing. */
+export interface SessionsRequest {
+  v: 1;
+  op: 'sessions';
 }
 
 /**
@@ -131,7 +141,13 @@ export type TransferRequest =
   | TransferCloseRequest;
 
 export type ShellRequest =
-  ExecRequest | CloseRequest | PingRequest | TransferRequest | MkdirRequest | ListRequest;
+  | ExecRequest
+  | CloseRequest
+  | PingRequest
+  | SessionsRequest
+  | TransferRequest
+  | MkdirRequest
+  | ListRequest;
 
 export interface JobResult {
   jobId: string;
@@ -180,6 +196,22 @@ export interface PingResult {
   deadDropVersion: string;
   /** Milliseconds since `ddshell serve` started. */
   uptimeMs: number;
+}
+
+export interface SessionInfo {
+  sessionId: string;
+  name?: string;
+  pid?: number;
+  cwd: string;
+  /** Milliseconds since its last command finished; 0 while one is queued or running. */
+  idleMs: number;
+  busy: boolean;
+}
+
+export interface SessionsResult {
+  /** The server account's home, so a client can abbreviate `cwd` to `~`. */
+  home: string;
+  sessions: SessionInfo[];
 }
 
 export interface TransferOpened {
@@ -245,6 +277,26 @@ export function isJobId(value: unknown): value is string {
   return typeof value === 'string' && UUID.test(value);
 }
 
+const SESSION_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** Up to 64 letters, digits, `.`, `_` or `-`. */
+export function isSessionName(value: unknown): value is string {
+  return typeof value === 'string' && SESSION_NAME.test(value);
+}
+
+/**
+ * The session id a name stands for. Every client derives the same one, so a
+ * named session is found again by asking for it: an `open` for a live session
+ * joins it, and for a missing one starts it. Ids are scoped to the caller's
+ * identity on the server, so two controllers' sessions of one name stay apart.
+ */
+export function namedSessionId(name: string): string {
+  const hex = createHash('sha256').update(`ddshell-session\0${name}`).digest('hex');
+  // Shaped as an RFC 9562 version 8 (custom) UUID.
+  const variant = ((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 function bad(message: string): never {
   throw new DeadDropError('BAD_REQUEST', message);
 }
@@ -254,6 +306,7 @@ export function parseRequest(raw: unknown): ShellRequest {
   const source = raw as Record<string, unknown>;
   if (source.v !== 1) bad(`unsupported shell protocol version ${String(source.v)}`);
   if (source.op === 'ping') return { v: 1, op: 'ping' };
+  if (source.op === 'sessions') return { v: 1, op: 'sessions' };
   if (typeof source.op === 'string' && TRANSFER_OPS.has(source.op)) return parseTransfer(source);
   if (source.op === 'list') return { v: 1, op: 'list', path: path(source.path, 'path') };
   if (source.op === 'mkdir') return parseMkdir(source);
@@ -264,6 +317,9 @@ export function parseRequest(raw: unknown): ShellRequest {
   if (!isJobId(source.jobId)) bad('jobId must be a UUID');
   if (typeof source.command !== 'string') bad('command must be a string');
   if (source.command.includes('\0')) bad('command must not contain NUL bytes');
+  if (source.name !== undefined && !isSessionName(source.name)) {
+    bad('name must be 1 to 64 letters, digits, ".", "_" or "-"');
+  }
   return {
     v: 1,
     op: 'exec',
@@ -272,6 +328,7 @@ export function parseRequest(raw: unknown): ShellRequest {
     command: source.command,
     ...(source.open === true ? { open: true } : {}),
     ...(source.close === true ? { close: true } : {}),
+    ...(source.name === undefined ? {} : { name: source.name }),
   };
 }
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `--session <name>` keeps a shell you can come back to, like a tmux session: `ddshell vm --session build` joins it where you left it, `ddshell exec vm --session build -- make` runs in it, and leaving keeps it open. `ddshell sessions vm` lists your live sessions.
 - `ddshell put`, `ddshell get` and scp-style `ddshell cp vm:path local` copy files. Each copy is checked with sha256 and lands whole or not at all. Files up to 64 MiB by default, sent in pieces.
 - `-r` on `put`, `get` and `cp` copies whole directories, as `scp -r` does. Small files take one round trip each.
 
