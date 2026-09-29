@@ -9,7 +9,7 @@
 - `--session <name>` keeps a shell you can come back to, like a tmux session: `ddshell vm --session build` joins it where you left it, `ddshell exec vm --session build -- make` runs in it, and leaving keeps it open. `ddshell sessions vm` lists your live sessions.
 - `ddshell put`, `ddshell get` and scp-style `ddshell cp vm:path local` copy files. Each copy is checked with sha256 and lands whole or not at all. Files up to 64 MiB by default, sent in pieces.
 - `-r` on `put`, `get` and `cp` copies whole directories, as `scp -r` does. Small files take one round trip each.
-
+- `examples/ddshell-server@.service` runs one server per person, each as their own account with their own repository and secret. See `docs/per-person.md`.
 - A slow command in one session no longer holds up the other sessions over git or GitHub. This needs dead-drop 0.16.1, which is now the minimum.
 - `ddshell check` tests a config before you rely on it: it parses, the secret file is private, the server's shell and ledger work, every transport answers, and each target is announcing itself.
 - `ddshell ping <target>` checks a server is up and shows its versions, uptime and round trip. `--count` repeats it and prints min, median and max.

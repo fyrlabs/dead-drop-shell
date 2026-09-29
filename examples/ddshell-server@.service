@@ -1,0 +1,35 @@
+# /etc/systemd/system/ddshell-server@.service
+#
+# One server per person. `systemctl enable --now ddshell-server@alice` runs a
+# server as the account "alice", with its own config, workspace, repository and
+# secret in /home/alice/.deaddrop. The account's permissions are the boundary:
+# every command that person runs, runs as them. See docs/per-person.md.
+#
+# The instance name is the account name, so it may be a real login account or a
+# dedicated one such as "ddshell-alice".
+
+[Unit]
+Description=ddshell server for %i (line-oriented remote shell over dead-drop)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+WorkingDirectory=~
+# No --config: ddshell reads ~/.deaddrop/ddshell.json of the instance's account.
+ExecStart=/usr/bin/env ddshell serve
+Restart=on-failure
+RestartSec=5
+# Stop sends SIGTERM; the server closes every session shell before exiting.
+KillMode=mixed
+TimeoutStopSec=30
+
+# Hardening that does not get in the way of an ordinary shell account.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

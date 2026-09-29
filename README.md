@@ -107,6 +107,7 @@ Read [SECURITY.md](SECURITY.md) before deploying. In short: the OS account runni
 ## Documentation
 
 - [docs/github-setup.md](docs/github-setup.md): a VM over a private GitHub repository, with systemd
+- [docs/per-person.md](docs/per-person.md): one server per person on a shared machine, each as their own account
 - [docs/configuration.md](docs/configuration.md): every `shell` field
 - [docs/architecture.md](docs/architecture.md): how sessions, the ledger and the protocol fit together
 - [docs/upstream-requirements.md](docs/upstream-requirements.md): what building this taught us about a future dead-drop extension host

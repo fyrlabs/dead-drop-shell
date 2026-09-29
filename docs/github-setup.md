@@ -99,6 +99,8 @@ The unit runs `ddshell` through `/usr/bin/env`, so it must be on systemd's `PATH
 
 A server set up this way (git transport, token in the credential store, systemd unit with absolute paths) has run end to end on a Linux VM. The unit exactly as shipped, with `/usr/bin/env`, and a reboot of the VM have not been tested.
 
+To give several people a server each on the same machine, each under their own account, see [per-person.md](per-person.md).
+
 ## 7. Connect
 
 ```bash
