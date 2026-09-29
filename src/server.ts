@@ -186,6 +186,8 @@ export class ShellServer {
         uptimeMs: Math.round(performance.now() - this.startedAt),
       };
     }
+    if (request.op === 'list') return this.transfers.list(request.path);
+    if (request.op === 'mkdir') return this.transfers.mkdir(request);
     if (request.op !== 'exec' && request.op !== 'close') {
       return this.transfer(context.identity, request);
     }

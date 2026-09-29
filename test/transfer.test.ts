@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
@@ -9,6 +10,7 @@ import {
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -229,5 +231,110 @@ describe('file transfer', () => {
       .call('vm', SHELL_CHANNEL, { v: 1, op: 'put-commit', transferId }, { timeoutMs: 10_000 })
       .catch((e: unknown) => e);
     expect(error).toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('copies a directory tree both ways, following links and skipping what it cannot copy', async () => {
+    const client = await start();
+    const tree = join(local, 'tree');
+    const big = randomBytes(5_000);
+    await mkdir(join(tree, 'sub', 'deeper'), { recursive: true });
+    await mkdir(join(tree, 'empty'));
+    await writeFile(join(tree, 'small.txt'), 'small');
+    await writeFile(join(tree, 'sub', 'big.bin'), big);
+    await writeFile(join(tree, 'sub', 'deeper', 'nothing'), '');
+    await chmod(join(tree, 'small.txt'), 0o640);
+    await symlink('small.txt', join(tree, 'link.txt'));
+    await symlink('..', join(tree, 'sub', 'loop'));
+    await symlink('missing', join(tree, 'dangling'));
+    execFileSync('mkfifo', [join(tree, 'fifo')]);
+
+    const put = await client.putTree('vm', tree, 'copy', { timeoutMs: 10_000 });
+    expect(put).toMatchObject({ path: join(home, 'copy'), files: 4, bytes: 5_010, failed: [] });
+    expect(put.skipped.map((entry) => entry.path).sort()).toEqual(['dangling', 'fifo', 'sub/loop']);
+    expect(await readFile(join(home, 'copy', 'sub', 'big.bin'))).toEqual(big);
+    expect(await readFile(join(home, 'copy', 'link.txt'), 'utf8')).toBe('small');
+    expect((await stat(join(home, 'copy', 'small.txt'))).mode & 0o777).toBe(0o640);
+    expect((await stat(join(home, 'copy', 'empty'))).isDirectory()).toBe(true);
+    expect(await readFile(join(home, 'copy', 'sub', 'deeper', 'nothing'), 'utf8')).toBe('');
+
+    // Into an existing directory it lands under its own name, as scp -r does.
+    const again = await client.putTree('vm', tree, 'copy', { timeoutMs: 10_000 });
+    expect(again.path).toBe(join(home, 'copy', 'tree'));
+
+    const progress: number[] = [];
+    const got = await client.getTree('vm', 'copy/', join(local, 'back'), {
+      timeoutMs: 10_000,
+      onProgress: (done) => progress.push(done),
+    });
+    expect(got).toMatchObject({ path: join(local, 'back'), files: 8, failed: [], skipped: [] });
+    expect(await readFile(join(local, 'back', 'sub', 'big.bin'))).toEqual(big);
+    expect(await readFile(join(local, 'back', 'tree', 'link.txt'), 'utf8')).toBe('small');
+    expect((await stat(join(local, 'back', 'empty'))).isDirectory()).toBe(true);
+    expect(Math.max(...progress)).toBe(2 * 5_010);
+    expect(await temporaries(join(local, 'back'))).toEqual([]);
+  });
+
+  it('copies a single file when asked for a tree', async () => {
+    const client = await start();
+    await writeFile(join(local, 'one'), 'one');
+    expect(await client.putTree('vm', join(local, 'one'), 'one', { timeoutMs: 10_000 })).toEqual({
+      path: join(home, 'one'),
+      files: 1,
+      bytes: 3,
+      failed: [],
+      skipped: [],
+    });
+    const got = await client.getTree('vm', 'one', join(local, 'two'), { timeoutMs: 10_000 });
+    expect(got.path).toBe(join(local, 'two'));
+    expect(await readFile(join(local, 'two'), 'utf8')).toBe('one');
+  });
+
+  it('moves a file that fits one chunk in a single request each way', async () => {
+    const client = await start();
+    const call = <T>(request: Record<string, unknown>) =>
+      client.workspace.call<T>('vm', SHELL_CHANNEL, { v: 1, ...request }, { timeoutMs: 10_000 });
+    const data = Buffer.from('inline');
+    const put = await call<TransferOpened>({
+      op: 'put-open',
+      transferId: randomUUID(),
+      path: 'inline',
+      name: 'inline',
+      size: data.length,
+      sha256: sha256(data),
+      mode: 0o600,
+      data: data.toString('base64'),
+    });
+    expect(put.committed).toBe(true);
+    expect(await readFile(join(home, 'inline'), 'utf8')).toBe('inline');
+
+    const get = await call<TransferOpened>({
+      op: 'get-open',
+      transferId: randomUUID(),
+      path: 'inline',
+      inline: 1_000,
+    });
+    expect(Buffer.from(get.data!, 'base64').toString()).toBe('inline');
+    expect(await temporaries(home)).toEqual([]);
+  });
+
+  it('refuses a directory path that climbs out of the copy', async () => {
+    const client = await start();
+    const error = await client.workspace
+      .call(
+        'vm',
+        SHELL_CHANNEL,
+        {
+          v: 1,
+          op: 'mkdir',
+          path: 'x',
+          name: 'x',
+          mode: 0o755,
+          dirs: [{ path: '../y', mode: 0o755 }],
+        },
+        { timeoutMs: 10_000 },
+      )
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: 'BAD_REQUEST' });
+    expect(existsSync(join(home, 'x'))).toBe(false);
   });
 });

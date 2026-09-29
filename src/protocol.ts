@@ -52,6 +52,11 @@ export interface PutOpenRequest {
   sha256: string;
   /** Permission bits for the new file. */
   mode: number;
+  /**
+   * Base64, the whole file. A server that takes it (the file fits one chunk)
+   * writes and commits in this one request and answers `committed`.
+   */
+  data?: string;
 }
 
 export interface PutChunkRequest {
@@ -74,6 +79,11 @@ export interface GetOpenRequest {
   op: 'get-open';
   transferId: string;
   path: string;
+  /**
+   * A file this size or smaller comes back whole in `data`, and the server
+   * releases the transfer at once, so no chunk or close requests follow.
+   */
+  inline?: number;
 }
 
 export interface GetChunkRequest {
@@ -91,6 +101,27 @@ export interface TransferCloseRequest {
   transferId: string;
 }
 
+/**
+ * Creates a directory tree in one request: the root lands at `path` as a put
+ * would (inside it, under `name`, when it is an existing directory), then every
+ * entry of `dirs` beneath the root, parents first. Existing directories are kept,
+ * as with `mkdir -p`.
+ */
+export interface MkdirRequest {
+  v: 1;
+  op: 'mkdir';
+  path: string;
+  name: string;
+  mode: number;
+  dirs: Array<{ path: string; mode: number }>;
+}
+
+export interface ListRequest {
+  v: 1;
+  op: 'list';
+  path: string;
+}
+
 export type TransferRequest =
   | PutOpenRequest
   | PutChunkRequest
@@ -99,7 +130,8 @@ export type TransferRequest =
   | GetChunkRequest
   | TransferCloseRequest;
 
-export type ShellRequest = ExecRequest | CloseRequest | PingRequest | TransferRequest;
+export type ShellRequest =
+  ExecRequest | CloseRequest | PingRequest | TransferRequest | MkdirRequest | ListRequest;
 
 export interface JobResult {
   jobId: string;
@@ -159,6 +191,35 @@ export interface TransferOpened {
   mode: number;
   /** Largest chunk the server accepts or sends. */
   chunkBytes: number;
+  /** An inline put already landed. */
+  committed?: boolean;
+  /** Base64, the whole file of an inline get. */
+  data?: string;
+}
+
+/** One entry below a listed directory. `path` is relative to it, `/`-separated. */
+export interface TreeEntry {
+  path: string;
+  kind: 'dir' | 'file';
+  mode: number;
+  size: number;
+}
+
+export interface ListResult {
+  /** Absolute path on the server. */
+  path: string;
+  kind: 'dir' | 'file';
+  mode: number;
+  size: number;
+  /** Everything below a directory, parents before children. Empty for a file. */
+  entries: TreeEntry[];
+  /** What a copy leaves out: special files, broken links, loops, unreadable directories. */
+  skipped: Array<{ path: string; reason: string }>;
+}
+
+export interface MkdirResult {
+  /** The root's absolute path on the server. */
+  path: string;
 }
 
 export interface PutChunkResult {
@@ -175,7 +236,7 @@ export interface TransferCloseResult {
 }
 
 export type TransferResponse =
-  TransferOpened | PutChunkResult | GetChunkResult | TransferCloseResult;
+  TransferOpened | PutChunkResult | GetChunkResult | TransferCloseResult | ListResult | MkdirResult;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -194,6 +255,8 @@ export function parseRequest(raw: unknown): ShellRequest {
   if (source.v !== 1) bad(`unsupported shell protocol version ${String(source.v)}`);
   if (source.op === 'ping') return { v: 1, op: 'ping' };
   if (typeof source.op === 'string' && TRANSFER_OPS.has(source.op)) return parseTransfer(source);
+  if (source.op === 'list') return { v: 1, op: 'list', path: path(source.path, 'path') };
+  if (source.op === 'mkdir') return parseMkdir(source);
   if (!isJobId(source.sessionId)) bad('sessionId must be a UUID');
 
   if (source.op === 'close') return { v: 1, op: 'close', sessionId: source.sessionId };
@@ -234,28 +297,65 @@ function path(value: unknown, name: string): string {
   return value;
 }
 
+/** Most entries a listing or a `mkdir` carries. */
+export const MAX_TREE_ENTRIES = 100_000;
+
+function name(value: unknown): string {
+  const plain = path(value, 'name');
+  if (plain.includes('/') || plain === '.' || plain === '..') bad('name must be a plain file name');
+  return plain;
+}
+
+function mode(value: unknown): number {
+  const bits = count(value, 'mode');
+  if (bits > 0o777) bad('mode must be permission bits only');
+  return bits;
+}
+
+function relative(value: unknown): string {
+  const plain = path(value, 'dirs path');
+  if (plain.split('/').some((part) => part === '' || part === '.' || part === '..')) {
+    bad('dirs paths must be relative, without empty, . or .. parts');
+  }
+  return plain;
+}
+
+function parseMkdir(source: Record<string, unknown>): MkdirRequest {
+  if (!Array.isArray(source.dirs)) bad('dirs must be an array');
+  if (source.dirs.length > MAX_TREE_ENTRIES) bad(`at most ${MAX_TREE_ENTRIES} dirs per request`);
+  return {
+    v: 1,
+    op: 'mkdir',
+    path: path(source.path, 'path'),
+    name: name(source.name),
+    mode: mode(source.mode),
+    dirs: source.dirs.map((entry: unknown) => {
+      if (typeof entry !== 'object' || entry === null) bad('dirs entries must be objects');
+      const { path: dir, mode: bits } = entry as Record<string, unknown>;
+      return { path: relative(dir), mode: mode(bits) };
+    }),
+  };
+}
+
 function parseTransfer(source: Record<string, unknown>): TransferRequest {
   if (!isJobId(source.transferId)) bad('transferId must be a UUID');
   const transferId = source.transferId;
   switch (source.op) {
     case 'put-open': {
-      const name = path(source.name, 'name');
-      if (name.includes('/') || name === '.' || name === '..')
-        bad('name must be a plain file name');
       if (typeof source.sha256 !== 'string' || !SHA256.test(source.sha256)) {
         bad('sha256 must be 64 lowercase hex digits');
       }
-      const mode = count(source.mode, 'mode');
-      if (mode > 0o777) bad('mode must be permission bits only');
+      if (source.data !== undefined && typeof source.data !== 'string') bad('data must be base64');
       return {
         v: 1,
         op: 'put-open',
         transferId,
         path: path(source.path, 'path'),
-        name,
+        name: name(source.name),
         size: count(source.size, 'size'),
         sha256: source.sha256,
-        mode,
+        mode: mode(source.mode),
+        ...(source.data === undefined ? {} : { data: source.data }),
       };
     }
     case 'put-chunk':
@@ -268,7 +368,13 @@ function parseTransfer(source: Record<string, unknown>): TransferRequest {
         data: source.data,
       };
     case 'get-open':
-      return { v: 1, op: 'get-open', transferId, path: path(source.path, 'path') };
+      return {
+        v: 1,
+        op: 'get-open',
+        transferId,
+        path: path(source.path, 'path'),
+        ...(source.inline === undefined ? {} : { inline: count(source.inline, 'inline') }),
+      };
     case 'get-chunk':
       return {
         v: 1,

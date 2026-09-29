@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { open, rename, rm } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { basename, dirname, join, posix, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
@@ -16,10 +16,15 @@ import {
   type PingRequest,
   type PingResult,
   type GetChunkResult,
+  type ListRequest,
+  type ListResult,
+  type MkdirRequest,
+  type MkdirResult,
   type TransferOpened,
+  type TreeEntry,
   type TransferRequest,
 } from './protocol.js';
-import { destination, hashFile, temporaryPath } from './transfer.js';
+import { destination, hashFile, makeTree, temporaryPath, walk } from './transfer.js';
 
 export interface ClientOptions {
   runtime: RuntimeConfig;
@@ -38,6 +43,12 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 /** Chunk requests kept in flight at once, so a slow transport's latency overlaps. */
 const TRANSFER_WINDOW = 4;
 
+/** Files this size or smaller travel inside the open request and its answer: one round trip. */
+const INLINE_BYTES = 64 * 1024;
+
+/** Files of a recursive copy kept in flight at once. */
+const FILE_WINDOW = 4;
+
 /** Tries per transfer request. Every step is idempotent on the server, so a retry is safe. */
 const TRANSFER_ATTEMPTS = 3;
 
@@ -47,6 +58,17 @@ export interface TransferOptions {
   signal?: AbortSignal;
   /** Called as chunks land, with bytes done so far and the file size. */
   onProgress?: (done: number, total: number) => void;
+}
+
+/** What a recursive copy did. It carries on past a file that fails, as scp -r does. */
+export interface TreeCopy {
+  /** Where the top landed. */
+  path: string;
+  files: number;
+  bytes: number;
+  failed: Array<{ path: string; error: unknown }>;
+  /** Left out on the sending side: special files, broken links, loops, unreadable directories. */
+  skipped: Array<{ path: string; reason: string }>;
 }
 
 /** Maps a target name to a server peer id. An unmapped name is taken as a peer id. */
@@ -132,6 +154,8 @@ export class ShellClient {
       }
       const { size, sha256 } = await hashFile(handle);
       const transferId = randomUUID();
+      const whole = size <= INLINE_BYTES ? Buffer.alloc(size) : undefined;
+      if (whole) await handle.read(whole, 0, size, 0);
       const opened = await this.transfer<TransferOpened>(peer, options, {
         v: 1,
         op: 'put-open',
@@ -141,7 +165,12 @@ export class ShellClient {
         size,
         sha256,
         mode: stats.mode & 0o777,
+        ...(whole ? { data: whole.toString('base64') } : {}),
       });
+      if (opened.committed) {
+        options.onProgress?.(size, size);
+        return opened;
+      }
       try {
         await chunked(size, opened.chunkBytes, options, async (offset, length) => {
           const data = Buffer.alloc(length);
@@ -187,13 +216,21 @@ export class ShellClient {
       op: 'get-open',
       transferId,
       path: remote,
+      inline: INLINE_BYTES,
     });
+    // An inline answer has already released the transfer on the server.
+    const inline = opened.data === undefined ? undefined : Buffer.from(opened.data, 'base64');
     try {
       const target = await destination(local, basename(opened.path));
       const temporary = temporaryPath(target, transferId);
       const handle = await open(temporary, 'w+', 0o600);
       try {
-        await chunked(opened.size, opened.chunkBytes, options, async (offset, length) => {
+        if (inline) {
+          await handle.write(inline, 0, inline.length, 0);
+          options.onProgress?.(inline.length, opened.size);
+        }
+        const size = inline ? 0 : opened.size;
+        await chunked(size, opened.chunkBytes, options, async (offset, length) => {
           const { data } = await this.transfer<GetChunkResult>(peer, options, {
             v: 1,
             op: 'get-chunk',
@@ -220,18 +257,99 @@ export class ShellClient {
       }
       await handle.close();
       await rename(temporary, target);
-      return { ...opened, path: target };
+      const { data: _data, ...landed } = opened;
+      return { ...landed, path: target };
     } finally {
-      await this.transfer(peer, {}, { v: 1, op: 'transfer-close', transferId }).catch(
-        () => undefined,
-      );
+      if (!inline) {
+        await this.transfer(peer, {}, { v: 1, op: 'transfer-close', transferId }).catch(
+          () => undefined,
+        );
+      }
+    }
+  }
+
+  /**
+   * Uploads a file or a whole directory, as `scp -r`. The directory tree is
+   * created in one request, then files go a few at a time.
+   */
+  async putTree(
+    peer: string,
+    local: string,
+    remote: string,
+    options: TransferOptions = {},
+  ): Promise<TreeCopy> {
+    const tree = await walk(local);
+    if (tree.kind === 'file') return single(await this.put(peer, local, remote, options));
+    const request: MkdirRequest = {
+      v: 1,
+      op: 'mkdir',
+      path: remote,
+      name: basename(resolve(local)),
+      mode: tree.mode,
+      dirs: tree.entries.flatMap(({ kind, path, mode }) =>
+        kind === 'dir' ? [{ path, mode }] : [],
+      ),
+    };
+    const { path: root } = await this.treeCall<MkdirResult>(peer, options, request);
+    return copyFiles(root, tree, options, (file, fileOptions) =>
+      this.put(
+        peer,
+        join(local, file.path),
+        `${posix.join(root, posix.dirname(file.path))}/`,
+        fileOptions,
+      ),
+    );
+  }
+
+  /** Downloads a file or a whole directory, as `scp -r`. */
+  async getTree(
+    peer: string,
+    remote: string,
+    local: string,
+    options: TransferOptions = {},
+  ): Promise<TreeCopy> {
+    const tree = await this.treeCall<ListResult>(peer, options, { v: 1, op: 'list', path: remote });
+    if (tree.kind === 'file') return single(await this.get(peer, remote, local, options));
+    const root = await destination(local, basename(tree.path), 'dir');
+    const dirs = tree.entries.filter((entry) => entry.kind === 'dir');
+    await makeTree(root, tree.mode, dirs);
+    return copyFiles(root, tree, options, (file, fileOptions) =>
+      this.get(
+        peer,
+        posix.join(tree.path, file.path),
+        `${join(root, dirname(file.path))}/`,
+        fileOptions,
+      ),
+    );
+  }
+
+  /** `list` and `mkdir` arrived with recursive copy. An older server refuses them as sessionless commands. */
+  private async treeCall<Result>(
+    peer: string,
+    options: TransferOptions,
+    request: TransferRequest | MkdirRequest | ListRequest,
+  ): Promise<Result> {
+    try {
+      return await this.transfer<Result>(peer, options, request);
+    } catch (error) {
+      if (
+        DeadDropError.is(error) &&
+        error.code === 'BAD_REQUEST' &&
+        /sessionId/.test(error.message)
+      ) {
+        throw new DeadDropError(
+          'UNSUPPORTED',
+          `${peer} runs a ddshell without recursive copy; upgrade it to copy directories`,
+        );
+      }
+      throw error;
     }
   }
 
   private async transfer<Result>(
     peer: string,
     options: TransferOptions,
-    request: TransferRequest,
+    request: TransferRequest | MkdirRequest | ListRequest,
   ): Promise<Result> {
     for (let attempt = 1; ; attempt += 1) {
       try {
@@ -295,6 +413,46 @@ export class RemoteSession {
     const request: CloseRequest = { v: 1, op: 'close', sessionId: this.id };
     await this.workspace.call<CloseResult>(this.peer, SHELL_CHANNEL, request, { timeoutMs });
   }
+}
+
+function single(landed: TransferOpened): TreeCopy {
+  return { path: landed.path, files: 1, bytes: landed.size, failed: [], skipped: [] };
+}
+
+/** Copies every file of `tree` a few at a time, recording failures instead of stopping. */
+async function copyFiles(
+  root: string,
+  tree: Pick<ListResult, 'entries' | 'skipped'>,
+  options: TransferOptions,
+  copy: (file: TreeEntry, options: TransferOptions) => Promise<TransferOpened>,
+): Promise<TreeCopy> {
+  const files = tree.entries.filter((entry) => entry.kind === 'file');
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  const done = new Map<string, number>();
+  let finished = 0;
+  const result: TreeCopy = { path: root, files: 0, bytes: 0, failed: [], skipped: tree.skipped };
+  const worker = async () => {
+    while (finished < files.length) {
+      const file = files[finished]!;
+      finished += 1;
+      const onProgress = (bytes: number) => {
+        done.set(file.path, bytes);
+        let sum = 0;
+        for (const value of done.values()) sum += value;
+        options.onProgress?.(sum, total);
+      };
+      try {
+        const landed = await copy(file, { ...options, onProgress });
+        result.files += 1;
+        result.bytes += landed.size;
+      } catch (error) {
+        result.failed.push({ path: file.path, error });
+        if (options.signal?.aborted) return;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: FILE_WINDOW }, worker));
+  return result;
 }
 
 /**

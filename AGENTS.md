@@ -13,19 +13,19 @@ npm run format      # prettier --write
 
 ## Layout
 
-| Path              | Contents                                                                                          |
-| ----------------- | ------------------------------------------------------------------------------------------------- |
-| `src/session.ts`  | `ShellSession`: one long-lived child shell, nonce-delimited command trailer, output cap, timeouts |
-| `src/ledger.ts`   | `JobLedger`: one JSON file per job id, atomic writes, `running` becomes `unknown` on open         |
-| `src/protocol.ts` | `shell.v1` request and response types, `parseRequest`                                             |
-| `src/transfer.ts` | `ServerTransfers` (put/get state, temp file, commit), `hashFile`, `destination`                   |
-| `src/version.ts`  | `VERSION` and `DEAD_DROP_VERSION`, read from the package manifests                                |
-| `src/config.ts`   | `shell` config section, defaults, `loadConfig`                                                    |
-| `src/server.ts`   | `ShellServer`: embedded runtime, authorisation, sessions, ledger, idle sweep                      |
-| `src/client.ts`   | `ShellClient`, `RemoteSession`                                                                    |
-| `src/check.ts`    | `ddshell check`: config, secret file modes, server shell and ledger, transports, target beacons   |
-| `src/cli.ts`      | argument parsing, interactive loop, `exec`, exit codes                                            |
-| `test/`           | unit tests plus integration tests over dead-drop's filesystem transport                           |
+| Path              | Contents                                                                                             |
+| ----------------- | ---------------------------------------------------------------------------------------------------- |
+| `src/session.ts`  | `ShellSession`: one long-lived child shell, nonce-delimited command trailer, output cap, timeouts    |
+| `src/ledger.ts`   | `JobLedger`: one JSON file per job id, atomic writes, `running` becomes `unknown` on open            |
+| `src/protocol.ts` | `shell.v1` request and response types, `parseRequest`                                                |
+| `src/transfer.ts` | `ServerTransfers` (put/get state, temp file, commit, list, mkdir), `hashFile`, `destination`, `walk` |
+| `src/version.ts`  | `VERSION` and `DEAD_DROP_VERSION`, read from the package manifests                                   |
+| `src/config.ts`   | `shell` config section, defaults, `loadConfig`                                                       |
+| `src/server.ts`   | `ShellServer`: embedded runtime, authorisation, sessions, ledger, idle sweep                         |
+| `src/client.ts`   | `ShellClient`, `RemoteSession`                                                                       |
+| `src/check.ts`    | `ddshell check`: config, secret file modes, server shell and ledger, transports, target beacons      |
+| `src/cli.ts`      | argument parsing, interactive loop, `exec`, exit codes                                               |
+| `test/`           | unit tests plus integration tests over dead-drop's filesystem transport                              |
 
 ## Invariants: do not break these
 

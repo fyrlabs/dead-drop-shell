@@ -6,6 +6,7 @@ import {
   readdir,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -397,6 +398,27 @@ describe('ddshell cli', () => {
     ).toBe(0);
     expect(await readFile(back, 'utf8')).toBe('remember\n');
     expect(get.err()).toMatch(/vm:copy\.txt -> .*back\.txt, 9 bytes, sha256 [0-9a-f]{64}/);
+  });
+
+  it('cp -r copies directories both ways and exits 1 when it skips something', async () => {
+    const tree = join(root, 'site');
+    await mkdir(join(tree, 'css'), { recursive: true });
+    await writeFile(join(tree, 'index.html'), '<p>hi</p>');
+    await writeFile(join(tree, 'css', 'main.css'), 'p {}');
+    expect(await main(['cp', '-r', tree, 'vm:', '--config', controllerConfig], io())).toBe(0);
+    expect(await readFile(join(home, 'site', 'css', 'main.css'), 'utf8')).toBe('p {}');
+
+    const back = join(root, 'back');
+    expect(await main(['cp', '-r', 'vm:site', back, '--config', controllerConfig], io())).toBe(0);
+    expect(await readFile(join(back, 'index.html'), 'utf8')).toBe('<p>hi</p>');
+
+    await symlink('nowhere', join(tree, 'dangling'));
+    const skipped = io();
+    expect(
+      await main(['put', '-r', 'vm', tree, 'again', '--config', controllerConfig], skipped),
+    ).toBe(1);
+    expect(skipped.err()).toMatch(/skipped dangling: broken symbolic link/);
+    expect(await readFile(join(home, 'again', 'index.html'), 'utf8')).toBe('<p>hi</p>');
   });
 
   it('put and get exit 1 with the reason when a copy fails', async () => {

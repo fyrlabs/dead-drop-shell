@@ -15,6 +15,7 @@ import {
   ShellClient,
   resolveTarget,
   type RemoteSession,
+  type TreeCopy,
 } from './client.js';
 import { DEFAULT_CONFIG_PATH, loadConfig } from './config.js';
 import type { ExecResponse, TransferOpened } from './protocol.js';
@@ -29,9 +30,9 @@ Usage:
   ddshell <target> [--config <file>] [--timeout <ms>] [--debug]
   ddshell exec <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug] -- <command...>
   ddshell ping <target>[,<target>...] [--config <file>] [--timeout <ms>] [--count <n>]
-  ddshell put <target>[,<target>...] <local-file> <remote-path> [--config <file>] [--timeout <ms>] [--debug]
-  ddshell get <target> <remote-file> <local-path> [--config <file>] [--timeout <ms>] [--debug]
-  ddshell cp [<target>:]<file> [<target>[,<target>...]:]<path> [--config <file>] [--timeout <ms>] [--debug]
+  ddshell put [-r] <target>[,<target>...] <local-file> <remote-path> [--config <file>] [--timeout <ms>] [--debug]
+  ddshell get [-r] <target> <remote-file> <local-path> [--config <file>] [--timeout <ms>] [--debug]
+  ddshell cp [-r] [<target>:]<file> [<target>[,<target>...]:]<path> [--config <file>] [--timeout <ms>] [--debug]
   ddshell check [--config <file>] [--debug]
 
 Config: --config, else $DDSHELL_CONFIG, else ${DEFAULT_CONFIG_PATH}
@@ -41,6 +42,8 @@ each output line is prefixed with its target and the exit code is the highest.
 Exit codes (ping): 0 every ping answered; 1 some did not; 255 ddshell failed.
 Exit codes (put, get, cp): 0 every copy landed and matched its sha256; 1 some did
 not; 255 ddshell failed. Remote relative paths start in the target's home, as in scp.
+-r copies directories, following symbolic links; a file that fails or is skipped
+(special files, loops) is reported and makes the exit code 1.
 Exit codes (check): 0 nothing failed (warnings allowed); 1 something failed.
 `;
 
@@ -70,6 +73,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         timeout: { type: 'string' },
         count: { type: 'string' },
         debug: { type: 'boolean', default: false },
+        recursive: { type: 'boolean', short: 'r', default: false },
         help: { type: 'boolean', short: 'h', default: false },
         version: { type: 'boolean', short: 'v', default: false },
       },
@@ -137,14 +141,22 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         command === 'put'
           ? { kind: 'put', targets: targets(target), local: from, remote: to }
           : { kind: 'get', target: single(target), remote: from, local: to };
-      return await transfer(io, config, copy, { timeoutMs, debug: values.debug });
+      return await transfer(io, config, copy, {
+        timeoutMs,
+        debug: values.debug,
+        recursive: values.recursive,
+      });
     }
     if (command === 'cp') {
       const [to, extra] = rest;
       if (target === undefined || to === undefined)
         throw usage('cp needs a source and a destination');
       if (extra !== undefined) throw usage(`unexpected argument "${extra}"`);
-      return await transfer(io, config, copyOf(target, to), { timeoutMs, debug: values.debug });
+      return await transfer(io, config, copyOf(target, to), {
+        timeoutMs,
+        debug: values.debug,
+        recursive: values.recursive,
+      });
     }
     if (target !== undefined) throw usage(`unexpected argument "${target}"`);
     return await interactive(io, config, command!, timeoutMs, values.debug);
@@ -329,17 +341,22 @@ async function transfer(
   io: Io,
   config: Loaded,
   copy: Copy,
-  options: { timeoutMs: number; debug: boolean },
+  options: { timeoutMs: number; debug: boolean; recursive: boolean },
 ): Promise<number> {
   const client = await ShellClient.start({ ...config, debug: options.debug });
   const peer = (target: string) => resolveTarget(config.shell, target);
+  const get = (target: string, remote: string, local: string, onProgress: Progress) =>
+    options.recursive
+      ? client.getTree(peer(target), remote, local, { timeoutMs: options.timeoutMs, onProgress })
+      : client.get(peer(target), remote, local, { timeoutMs: options.timeoutMs, onProgress });
+  const put = (target: string, local: string, remote: string, onProgress: Progress) =>
+    options.recursive
+      ? client.putTree(peer(target), local, remote, { timeoutMs: options.timeoutMs, onProgress })
+      : client.put(peer(target), local, remote, { timeoutMs: options.timeoutMs, onProgress });
   try {
     if (copy.kind === 'get') {
       return await copyOne(io, options, `${copy.target}:${copy.remote}`, (onProgress) =>
-        client.get(peer(copy.target), copy.remote, copy.local, {
-          timeoutMs: options.timeoutMs,
-          onProgress,
-        }),
+        get(copy.target, copy.remote, copy.local, onProgress),
       );
     }
     let local = copy.kind === 'put' ? copy.local : '';
@@ -353,10 +370,7 @@ async function transfer(
           options,
           `${copy.from}:${copy.remote}`,
           async (onProgress) => {
-            const landed = await client.get(peer(copy.from), copy.remote, `${scratch}/`, {
-              timeoutMs: options.timeoutMs,
-              onProgress,
-            });
+            const landed = await get(copy.from, copy.remote, `${scratch}/`, onProgress);
             local = landed.path;
             return landed;
           },
@@ -365,9 +379,7 @@ async function transfer(
       }
       const remote = copy.kind === 'put' ? copy.remote : copy.to;
       return await fanOut(io, copy.targets, (out, target) =>
-        copyOne(out, options, local, (onProgress) =>
-          client.put(peer(target), local, remote, { timeoutMs: options.timeoutMs, onProgress }),
-        ),
+        copyOne(out, options, local, (onProgress) => put(target, local, remote, onProgress)),
       );
     } finally {
       if (scratch) await rm(scratch, { recursive: true, force: true });
@@ -377,12 +389,17 @@ async function transfer(
   }
 }
 
-/** Runs one copy, drawing progress at a terminal. 0 when it landed intact, 1 when not. */
+type Progress = (done: number, total: number) => void;
+
+/**
+ * Runs one copy, drawing progress at a terminal. 0 when everything landed
+ * intact, 1 when not. A recursive copy reports each file it failed or skipped.
+ */
 async function copyOne(
   io: Io,
   options: { debug: boolean },
   source: string,
-  run: (onProgress: (done: number, total: number) => void) => Promise<TransferOpened>,
+  run: (onProgress: Progress) => Promise<TransferOpened | TreeCopy>,
 ): Promise<number> {
   const note = (message: string) => io.stderr.write(`[ddshell] ${message}\n`);
   const terminal = (io.stderr as { isTTY?: boolean }).isTTY === true;
@@ -393,12 +410,21 @@ async function copyOne(
   try {
     const landed = await run(onProgress);
     if (terminal) io.stderr.write('\n');
-    if (options.debug) {
-      note(
-        `${source} -> ${landed.path}, ${landed.size} bytes, sha256 ${landed.sha256}, ${Math.round(performance.now() - started)}ms`,
-      );
+    const elapsed = `${Math.round(performance.now() - started)}ms`;
+    if (!('files' in landed)) {
+      if (options.debug) {
+        note(
+          `${source} -> ${landed.path}, ${landed.size} bytes, sha256 ${landed.sha256}, ${elapsed}`,
+        );
+      }
+      return 0;
     }
-    return 0;
+    for (const { path, reason } of landed.skipped) note(`${source}: skipped ${path}: ${reason}`);
+    for (const { path, error } of landed.failed) note(`${source}: ${path}: ${describe(error)}`);
+    if (options.debug) {
+      note(`${source} -> ${landed.path}, ${landed.files} files, ${landed.bytes} bytes, ${elapsed}`);
+    }
+    return landed.failed.length + landed.skipped.length === 0 ? 0 : 1;
   } catch (error) {
     if (terminal) io.stderr.write('\n');
     note(`${source}: ${describe(error)}`);

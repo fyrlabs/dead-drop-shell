@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `ddshell put`, `ddshell get` and scp-style `ddshell cp vm:path local` copy files. Each copy is checked with sha256 and lands whole or not at all. Files up to 64 MiB by default, sent in pieces.
+- `-r` on `put`, `get` and `cp` copies whole directories, as `scp -r` does. Small files take one round trip each.
 
 - A slow command in one session no longer holds up the other sessions over git or GitHub. This needs dead-drop 0.16.1, which is now the minimum.
 - `ddshell check` tests a config before you rely on it: it parses, the secret file is private, the server's shell and ledger work, every transport answers, and each target is announcing itself.

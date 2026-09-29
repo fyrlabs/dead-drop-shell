@@ -6,6 +6,7 @@ export {
   resolveTarget,
   type ClientOptions,
   type TransferOptions,
+  type TreeCopy,
 } from './client.js';
 export {
   DEFAULT_CONFIG_PATH,

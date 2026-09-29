@@ -1,5 +1,14 @@
 import { createHash } from 'node:crypto';
-import { open, realpath, rename, rm, stat, type FileHandle } from 'node:fs/promises';
+import {
+  mkdir,
+  open,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  type FileHandle,
+} from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
@@ -9,12 +18,17 @@ import type {
   GetChunkRequest,
   GetChunkResult,
   GetOpenRequest,
+  ListResult,
+  MkdirRequest,
+  MkdirResult,
   PutChunkRequest,
   PutChunkResult,
   PutOpenRequest,
   TransferCloseResult,
   TransferOpened,
+  TreeEntry,
 } from './protocol.js';
+import { MAX_TREE_ENTRIES } from './protocol.js';
 
 /** Hashes a file from its start, whatever the handle's position, and reports its length. */
 export async function hashFile(handle: FileHandle): Promise<{ size: number; sha256: string }> {
@@ -33,12 +47,18 @@ export async function hashFile(handle: FileHandle): Promise<{ size: number; sha2
 /**
  * Where a copy named `name` lands when sent to `path`, as with cp and scp: inside
  * `path` if it is a directory, through the link if it is a symlink, else `path`.
+ * A file refuses to land on a directory; a directory merges into one.
  */
-export async function destination(path: string, name: string): Promise<string> {
+export async function destination(
+  path: string,
+  name: string,
+  kind: 'file' | 'dir' = 'file',
+): Promise<string> {
   const inside = await isDirectory(path);
   if (!inside && path.endsWith('/')) fail('NOT_FOUND', `no such directory: ${path}`);
   const target = inside ? join(path, name) : path;
-  if (await isDirectory(target)) fail('SERVICE_ERROR', `${target} is a directory`);
+  if (kind === 'file' && (await isDirectory(target)))
+    fail('SERVICE_ERROR', `${target} is a directory`);
   try {
     return await realpath(target);
   } catch (error) {
@@ -55,6 +75,86 @@ async function isDirectory(path: string): Promise<boolean> {
     if (code === 'ENOENT' || code === 'ENOTDIR') return false;
     throw fsError(error, path);
   }
+}
+
+/**
+ * Creates a directory, keeping one that exists. Owner access is added while the
+ * copy fills it, as scp does, so a read-only source directory can still be filled.
+ */
+export async function makeDirectory(path: string, mode: number): Promise<void> {
+  try {
+    await mkdir(path, { mode: mode | 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw fsError(error, path);
+    if (!(await isDirectory(path))) fail('SERVICE_ERROR', `${path} exists and is not a directory`);
+  }
+}
+
+/** Creates `root` and `dirs` below it, parents first, as `mkdir -p` would. */
+export async function makeTree(
+  root: string,
+  mode: number,
+  dirs: ReadonlyArray<{ path: string; mode: number }>,
+): Promise<void> {
+  await makeDirectory(root, mode);
+  for (const dir of dirs) await makeDirectory(join(root, dir.path), dir.mode);
+}
+
+/**
+ * Lists `path` for a recursive copy. Symlinks are followed, as scp -r does,
+ * except into a directory that is already one of their own parents.
+ */
+export async function walk(path: string): Promise<Omit<ListResult, 'path'>> {
+  const top = await stat(path).catch((error: unknown) => {
+    throw fsError(error, path);
+  });
+  const root = { kind: top.isDirectory() ? 'dir' : 'file', mode: top.mode & 0o777 } as const;
+  if (!top.isDirectory()) {
+    if (!top.isFile()) fail('SERVICE_ERROR', `${path} is not a regular file or directory`);
+    return { ...root, size: top.size, entries: [], skipped: [] };
+  }
+  const entries: TreeEntry[] = [];
+  const skipped: ListResult['skipped'] = [];
+  const visit = async (directory: string, prefix: string, parents: string[]) => {
+    let names: string[];
+    try {
+      names = (await readdir(directory)).sort();
+    } catch (error) {
+      if (prefix === '') throw fsError(error, directory);
+      skipped.push({ path: prefix, reason: fsError(error, directory).message });
+      return;
+    }
+    for (const name of names) {
+      const relative = prefix === '' ? name : `${prefix}/${name}`;
+      const full = join(directory, name);
+      const stats = await stat(full).catch(() => undefined);
+      if (!stats) {
+        skipped.push({ path: relative, reason: 'broken symbolic link or vanished' });
+        continue;
+      }
+      if (stats.isDirectory()) {
+        const id = `${stats.dev}:${stats.ino}`;
+        if (parents.includes(id)) {
+          skipped.push({ path: relative, reason: 'symbolic link loop' });
+          continue;
+        }
+        add({ path: relative, kind: 'dir', mode: stats.mode & 0o777, size: 0 });
+        await visit(full, relative, [...parents, id]);
+      } else if (stats.isFile()) {
+        add({ path: relative, kind: 'file', mode: stats.mode & 0o777, size: stats.size });
+      } else {
+        skipped.push({ path: relative, reason: 'not a regular file or directory' });
+      }
+    }
+  };
+  const add = (entry: TreeEntry) => {
+    if (entries.length >= MAX_TREE_ENTRIES) {
+      fail('PAYLOAD_TOO_LARGE', `${path} holds more than ${MAX_TREE_ENTRIES} entries`);
+    }
+    entries.push(entry);
+  };
+  await visit(path, '', [`${top.dev}:${top.ino}`]);
+  return { ...root, size: 0, entries, skipped };
 }
 
 /** A hidden file beside the target, so the final rename never crosses file systems. */
@@ -131,8 +231,15 @@ export class ServerTransfers {
     private readonly limits: TransferLimits,
   ) {}
 
-  putOpen(identity: string, request: PutOpenRequest): Promise<TransferOpened> {
-    return this.opening(identity, request.transferId, 'put', () => this.createUpload(request));
+  /** An upload that fits one chunk and carries its data is written and committed at once. */
+  async putOpen(identity: string, request: PutOpenRequest): Promise<TransferOpened> {
+    const { transferId, data } = request;
+    const opened = await this.opening(identity, transferId, 'put', () =>
+      this.createUpload(request),
+    );
+    if (data === undefined || request.size > this.limits.chunkBytes) return opened;
+    await this.putChunk(identity, { v: 1, op: 'put-chunk', transferId, offset: 0, data });
+    return { ...(await this.putCommit(identity, transferId)), committed: true };
   }
 
   async putChunk(identity: string, request: PutChunkRequest): Promise<PutChunkResult> {
@@ -158,8 +265,30 @@ export class ServerTransfers {
     return upload.commit;
   }
 
-  getOpen(identity: string, request: GetOpenRequest): Promise<TransferOpened> {
-    return this.opening(identity, request.transferId, 'get', () => this.createDownload(request));
+  /** A file within the client's `inline` and one chunk comes back whole, and the transfer ends. */
+  async getOpen(identity: string, request: GetOpenRequest): Promise<TransferOpened> {
+    const { transferId, inline } = request;
+    const opened = await this.opening(identity, transferId, 'get', () =>
+      this.createDownload(request),
+    );
+    if (inline === undefined || opened.size > Math.min(inline, this.limits.chunkBytes)) {
+      return opened;
+    }
+    const chunk = { v: 1, op: 'get-chunk', transferId, offset: 0, length: opened.size } as const;
+    const { data } = await this.getChunk(identity, chunk);
+    await this.close(identity, transferId);
+    return { ...opened, data };
+  }
+
+  async list(path: string): Promise<ListResult> {
+    const resolved = resolve(this.resolve(path));
+    return { path: resolved, ...(await walk(resolved)) };
+  }
+
+  async mkdir(request: MkdirRequest): Promise<MkdirResult> {
+    const root = await destination(this.resolve(request.path), request.name, 'dir');
+    await makeTree(root, request.mode, request.dirs);
+    return { path: root };
   }
 
   async getChunk(identity: string, request: GetChunkRequest): Promise<GetChunkResult> {
