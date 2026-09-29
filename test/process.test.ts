@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { generateWorkspaceSecret } from '@fyrlabs/dead-drop/protocol';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { waitFor } from './helpers.js';
+import { keyLines, waitFor } from './helpers.js';
 
 // Runs the built binary, so `npm test` builds first (the pretest script).
 const bin = fileURLToPath(new URL('../dist/bin.js', import.meta.url));
@@ -33,6 +33,8 @@ afterEach(async () => {
 
 async function writeConfig(peerId: string): Promise<string> {
   const path = join(root, `${peerId}.json`);
+  await keyLines(root, [peerId]);
+  const authorizedKeys = await keyLines(root, ['laptop']);
   await writeFile(
     path,
     JSON.stringify({
@@ -58,7 +60,14 @@ async function writeConfig(peerId: string): Promise<string> {
         },
       ],
       // Small chunks make an upload many requests, not one.
-      shell: { allowControllers: ['laptop'], targets: { vm: 'vm' }, transferChunkBytes: 4096 },
+      shell: {
+        authorizedKeys,
+        key: join(root, `${peerId}.key`),
+        hostKey: join(root, `${peerId}.host_key`),
+        knownHosts: join(root, `${peerId}.known_hosts`),
+        targets: { vm: 'vm' },
+        transferChunkBytes: 4096,
+      },
     }),
   );
   return path;

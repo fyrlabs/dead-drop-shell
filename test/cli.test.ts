@@ -20,7 +20,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ShellServer } from '../src/server.js';
 import { VERSION, main, type Io } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
-import { waitFor } from './helpers.js';
+import { formatPublicKey, readKeyPair } from '../src/keys.js';
+import { keyLines, waitFor } from './helpers.js';
 
 let root: string;
 let home: string;
@@ -29,6 +30,9 @@ let controllerConfig: string;
 
 async function writeConfig(peerId: string, secretFile: string): Promise<string> {
   const path = join(root, `${peerId}.json`);
+  // Every peer gets its own key; only laptop's is authorised.
+  await keyLines(root, [peerId]);
+  const authorizedKeys = await keyLines(root, ['laptop']);
   await writeFile(
     path,
     JSON.stringify({
@@ -45,13 +49,19 @@ async function writeConfig(peerId: string, secretFile: string): Promise<string> 
           presenceIntervalMs: 50,
         },
       ],
-      shell: { allowControllers: ['laptop'], targets: { vm: 'vm' } },
+      shell: {
+        authorizedKeys,
+        key: `./${peerId}.key`,
+        hostKey: `./${peerId}.host_key`,
+        knownHosts: `./${peerId}.known_hosts`,
+        targets: { vm: 'vm' },
+      },
     }),
   );
   return path;
 }
 
-function io(input = ''): Io & { out: () => string; err: () => string } {
+function io(input = ''): Io & { out: () => string; err: () => string; pins: () => string[] } {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const chunks = { out: [] as Buffer[], err: [] as Buffer[] };
@@ -65,9 +75,13 @@ function io(input = ''): Io & { out: () => string; err: () => string } {
     stderr,
     env: {},
     out: () => Buffer.concat(chunks.out).toString(),
-    err: () => Buffer.concat(chunks.err).toString(),
+    // The first request to a server pins its host key and says so; tests of that read `pins`.
+    err: () => Buffer.concat(chunks.err).toString().replace(PINNED, ''),
+    pins: () => Buffer.concat(chunks.err).toString().match(PINNED) ?? [],
   };
 }
+
+const PINNED = /^\[ddshell\] pinned host key SHA256:\S+ for \S+\n/gm;
 
 function terminalIo(): Io & {
   stdin: PassThrough & { isTTY: true; setRawMode(mode: boolean): PassThrough };
@@ -167,6 +181,55 @@ describe('ddshell cli', () => {
     expect(streams.out()).toBe('hi\n');
     expect(streams.err()).toBe('oops\n');
     expect(code).toBe(3);
+  });
+
+  it('keygen writes a key pair and prints the public line', async () => {
+    const path = join(root, 'keys', 'mine');
+    const streams = io();
+    expect(await main(['keygen', '-f', path, '-C', 'me@laptop'], streams)).toBe(0);
+    const key = await readKeyPair(path);
+    expect(streams.out()).toBe(`${formatPublicKey(key, 'me@laptop')}\n`);
+    expect(await readFile(`${path}.pub`, 'utf8')).toBe(streams.out());
+    expect(streams.err()).toContain(key.fingerprint);
+
+    const again = io();
+    expect(await main(['keygen', '-f', path], again)).toBe(255);
+    expect(again.err()).toMatch(/already exists; pass --force/);
+    expect(await main(['keygen', '-f', path, '--force'], io())).toBe(0);
+    expect((await readKeyPair(path)).fingerprint).not.toBe(key.fingerprint);
+  });
+
+  it('keygen defaults to shell.key, or next to a config that does not exist yet', async () => {
+    // vm.json's shell.key is ./vm.key, which already exists.
+    const configured = io();
+    expect(await main(['keygen', '--config', join(root, 'vm.json')], configured)).toBe(255);
+    expect(configured.err()).toContain(`${join(root, 'vm.key')} already exists`);
+    const fresh = join(root, 'fresh', 'ddshell.json');
+    expect(await main(['keygen', '--config', fresh], io())).toBe(0);
+    await readKeyPair(join(root, 'fresh', 'ddshell_key'));
+    const misplaced = io();
+    expect(await main(['ping', 'vm', '-f', 'x', '--config', controllerConfig], misplaced)).toBe(
+      255,
+    );
+    expect(misplaced.err()).toMatch(/apply to keygen only/);
+  });
+
+  it('hostkey prints the known_hosts line for the server', async () => {
+    const streams = io();
+    expect(await main(['hostkey', '--config', join(root, 'vm.json')], streams)).toBe(0);
+    const key = await readKeyPair(join(root, 'vm.host_key'));
+    expect(streams.out()).toBe(`vm ${formatPublicKey(key)}\n`);
+    expect(streams.err()).toContain(key.fingerprint);
+  });
+
+  it('says when it pins a host key, once', async () => {
+    const first = io();
+    expect(await main(['exec', 'vm', '--config', controllerConfig, '--', 'true'], first)).toBe(0);
+    const host = await readKeyPair(join(root, 'vm.host_key'));
+    expect(first.pins()).toEqual([`[ddshell] pinned host key ${host.fingerprint} for vm\n`]);
+    const second = io();
+    expect(await main(['exec', 'vm', '--config', controllerConfig, '--', 'true'], second)).toBe(0);
+    expect(second.pins()).toEqual([]);
   });
 
   it('exec fans out to several servers, prefixing output and exiting with the worst code', async () => {
@@ -272,7 +335,9 @@ describe('ddshell cli', () => {
     const streams = io();
     const intruder = await writeConfig('mallory', join(root, 'secret'));
     expect(await main(['ping', 'vm', '--config', intruder], streams)).toBe(1);
-    expect(streams.err()).toMatch(/UNAUTHORIZED: peer "mallory"/);
+    expect(streams.err()).toMatch(
+      /UNAUTHORIZED: key \S+ is not in this server's shell.authorizedKeys/,
+    );
   });
 
   it('rejects a bad count before starting anything', async () => {
@@ -293,6 +358,13 @@ describe('ddshell cli', () => {
     expect(out).toContain(`ok    secret: ${join(root, 'secret')} is readable by its owner only\n`);
     expect(out).toContain('ok    transport: filesystem (store) can be listed\n');
     expect(out).toMatch(/ok {4}target vm: peer vm serves shell\.v1, announced \d+s ago\n/);
+    expect(out).toMatch(/ok {4}key: .*laptop\.key: \S+\n/);
+    expect(out).toContain('ok    target vm: host key not pinned yet; the first request pins it\n');
+
+    expect(await main(['ping', 'vm', '--config', controllerConfig], io())).toBe(0);
+    const pinned = io();
+    expect(await main(['check', '--config', controllerConfig], pinned)).toBe(0);
+    expect(pinned.out()).toMatch(/ok {4}target vm: host key pinned: \S+\n/);
   });
 
   it('check covers the server side of a config', async () => {
@@ -300,7 +372,30 @@ describe('ddshell cli', () => {
     expect(await main(['check', '--config', join(root, 'vm.json')], streams)).toBe(0);
     expect(streams.out()).toContain('ok    server: shell /bin/sh is executable\n');
     expect(streams.out()).toMatch(/ok {4}server: ledger .*ddshell-ledger can be written\n/);
-    expect(streams.out()).toContain('ok    server: allows laptop\n');
+    expect(streams.out()).toMatch(/ok {4}server: authorises laptop \(\S+\)\n/);
+    expect(streams.out()).toMatch(/ok {4}server: host key .*vm\.host_key: \S+\n/);
+  });
+
+  it('check warns about v1 access and fails on a key others can read', async () => {
+    const config = JSON.parse(await readFile(join(root, 'vm.json'), 'utf8'));
+    config.shell.allowControllers = ['old'];
+    await writeFile(join(root, 'v1.json'), JSON.stringify(config));
+    const ignored = io();
+    await main(['check', '--config', join(root, 'v1.json')], ignored);
+    expect(ignored.out()).toMatch(/warn {2}shell: shell\.allowControllers is ignored unless/);
+
+    config.shell.allowV1 = true;
+    await writeFile(join(root, 'v1.json'), JSON.stringify(config));
+    const allowed = io();
+    await main(['check', '--config', join(root, 'v1.json')], allowed);
+    expect(allowed.out()).toMatch(/warn {2}server: shell\.allowV1 lets in old by peer id/);
+
+    await chmod(join(root, 'laptop.key'), 0o644);
+    const exposed = io();
+    expect(await main(['check', '--config', controllerConfig], exposed)).toBe(1);
+    expect(exposed.out()).toMatch(
+      /fail {2}key: CONFIG_INVALID: .*laptop\.key is readable by other users/,
+    );
   });
 
   it('check fails on an unreadable config, a missing shell and a broken transport', async () => {

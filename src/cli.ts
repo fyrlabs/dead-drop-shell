@@ -1,6 +1,6 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { hostname, tmpdir, userInfo } from 'node:os';
+import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
 import { Writable } from 'node:stream';
@@ -18,6 +18,7 @@ import {
   type TreeCopy,
 } from './client.js';
 import { DEFAULT_CONFIG_PATH, loadConfig } from './config.js';
+import { ensureKeyPair, formatPublicKey, generateKeyPair, writeKeyPair } from './keys.js';
 import { isSessionName, type ExecResponse, type TransferOpened } from './protocol.js';
 import { VERSION } from './version.js';
 
@@ -35,6 +36,8 @@ Usage:
   ddshell get [-r] <target> <remote-file> <local-path> [--config <file>] [--timeout <ms>] [--debug]
   ddshell cp [-r] [<target>:]<file> [<target>[,<target>...]:]<path> [--config <file>] [--timeout <ms>] [--debug]
   ddshell check [--config <file>] [--debug]
+  ddshell keygen [-f <file>] [-C <comment>] [--force] [--config <file>]
+  ddshell hostkey [--config <file>]
 
 Config: --config, else $DDSHELL_CONFIG, else ${DEFAULT_CONFIG_PATH}
 Exit codes (exec): the remote exit code; 124 timed out on the target; 125 unknown
@@ -48,6 +51,9 @@ not; 255 ddshell failed. Remote relative paths start in the target's home, as in
 -r copies directories, following symbolic links; a file that fails or is skipped
 (special files, loops) is reported and makes the exit code 1.
 Exit codes (check): 0 nothing failed (warnings allowed); 1 something failed.
+keygen writes a controller key (default: shell.key) and prints its public line,
+which goes in a server's shell.authorizedKeys. hostkey prints the server's line
+for a controller's shell.knownHosts, making the host key if needed.
 `;
 
 export interface Io {
@@ -78,6 +84,9 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         session: { type: 'string' },
         debug: { type: 'boolean', default: false },
         recursive: { type: 'boolean', short: 'r', default: false },
+        file: { type: 'string', short: 'f' },
+        comment: { type: 'string', short: 'C' },
+        force: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
         version: { type: 'boolean', short: 'v', default: false },
       },
@@ -118,6 +127,30 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     const named = command === 'exec' || !COMMANDS.has(command!);
     if (values.session !== undefined && !named) {
       throw usage(`--session applies to an interactive session or exec, not ${command}`);
+    }
+    if (
+      command !== 'keygen' &&
+      (values.file !== undefined || values.comment !== undefined || values.force)
+    ) {
+      throw usage('-f, -C and --force apply to keygen only');
+    }
+    if (command === 'keygen') {
+      if (target !== undefined) throw usage('keygen takes no positional arguments');
+      return await keygen(io, configPath, values);
+    }
+    if (command === 'hostkey') {
+      if (target !== undefined) throw usage('hostkey takes no positional arguments');
+      const config = await loadConfig(configPath);
+      const peerId = (
+        config.runtime.workspaces.find(({ name }) => name === config.shell.workspace) ??
+        config.runtime.workspaces[0]
+      )?.peerId;
+      if (peerId === undefined)
+        throw new DeadDropError('CONFIG_INVALID', 'no workspace configured');
+      const key = await ensureKeyPair(config.shell.hostKey, `ddshell-host ${peerId}`);
+      io.stdout.write(`${peerId} ${formatPublicKey(key)}\n`);
+      note(`${config.shell.hostKey}: ${key.fingerprint}`);
+      return 0;
     }
     if (command === 'serve') {
       if (target !== undefined) throw usage('serve takes no positional arguments');
@@ -192,7 +225,18 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
 }
 
 /** A first word that is one of these is a subcommand, not a target. */
-const COMMANDS = new Set(['serve', 'check', 'exec', 'sessions', 'ping', 'put', 'get', 'cp']);
+const COMMANDS = new Set([
+  'serve',
+  'check',
+  'keygen',
+  'hostkey',
+  'exec',
+  'sessions',
+  'ping',
+  'put',
+  'get',
+  'cp',
+]);
 
 /** `a,b,a` is `a` and `b`. */
 function targets(list: string): string[] {
@@ -250,6 +294,36 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * The key goes to `-f`, else the config's `shell.key`, else next to where the
+ * config would be: a controller makes its key before it has a config.
+ */
+async function keygen(
+  io: Io,
+  configPath: string,
+  options: { file?: string; comment?: string; force: boolean },
+): Promise<number> {
+  let path = options.file;
+  if (path === undefined) {
+    const exists = await access(configPath).then(
+      () => true,
+      () => false,
+    );
+    path = exists
+      ? (await loadConfig(configPath)).shell.key
+      : join(dirname(configPath), 'ddshell_key');
+  }
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const pair = generateKeyPair();
+  const comment = options.comment ?? `${userInfo().username}@${hostname()}`;
+  await writeKeyPair(path, pair, comment, options.force);
+  io.stdout.write(`${formatPublicKey(pair, comment)}\n`);
+  io.stderr.write(
+    `[ddshell] wrote ${path} and ${path}.pub (${pair.fingerprint}). Add the line above to each server's shell.authorizedKeys.\n`,
+  );
+  return 0;
+}
+
 async function serve(configPath: string): Promise<number> {
   const config = await loadConfig(configPath);
   const running = await ShellServer.start({
@@ -267,6 +341,12 @@ async function serve(configPath: string): Promise<number> {
 
 type Loaded = Awaited<ReturnType<typeof loadConfig>>;
 
+/** Pinning a host key on first use is worth a line: it is the moment to compare fingerprints. */
+function pinned(io: Io): (peer: string, fingerprint: string) => void {
+  return (peer, fingerprint) =>
+    io.stderr.write(`[ddshell] pinned host key ${fingerprint} for ${peer}\n`);
+}
+
 interface SessionOptions {
   timeoutMs: number;
   debug: boolean;
@@ -281,7 +361,11 @@ async function exec(
   command: string,
   options: SessionOptions,
 ): Promise<number> {
-  const client = await ShellClient.start({ ...config, debug: options.debug });
+  const client = await ShellClient.start({
+    ...config,
+    debug: options.debug,
+    onNewHost: pinned(io),
+  });
   try {
     return await fanOut(io, targets, (out, target) =>
       execOne(out, client, config, target, command, options),
@@ -321,7 +405,11 @@ async function ping(
   targets: string[],
   options: { timeoutMs: number; count: number; debug: boolean },
 ): Promise<number> {
-  const client = await ShellClient.start({ ...config, debug: options.debug });
+  const client = await ShellClient.start({
+    ...config,
+    debug: options.debug,
+    onNewHost: pinned(io),
+  });
   try {
     return await fanOut(io, targets, (out, target) =>
       pingOne(out, client, resolveTarget(config.shell, target), options),
@@ -377,7 +465,11 @@ async function sessions(
   targets: string[],
   options: { timeoutMs: number; debug: boolean },
 ): Promise<number> {
-  const client = await ShellClient.start({ ...config, debug: options.debug });
+  const client = await ShellClient.start({
+    ...config,
+    debug: options.debug,
+    onNewHost: pinned(io),
+  });
   try {
     return await fanOut(io, targets, async (out, target) => {
       let listed;
@@ -416,7 +508,11 @@ async function transfer(
   copy: Copy,
   options: { timeoutMs: number; debug: boolean; recursive: boolean },
 ): Promise<number> {
-  const client = await ShellClient.start({ ...config, debug: options.debug });
+  const client = await ShellClient.start({
+    ...config,
+    debug: options.debug,
+    onNewHost: pinned(io),
+  });
   const peer = (target: string) => resolveTarget(config.shell, target);
   const get = (target: string, remote: string, local: string, onProgress: Progress) =>
     options.recursive
@@ -582,7 +678,7 @@ async function interactive(
   { timeoutMs, debug, name }: SessionOptions,
 ): Promise<number> {
   const peer = resolveTarget(config.shell, target);
-  const client = await ShellClient.start({ ...config, debug });
+  const client = await ShellClient.start({ ...config, debug, onNewHost: pinned(io) });
   let session = client.session(peer, name);
   // A named session may be joined wherever it was left; `?` until known.
   let cwd = name === undefined ? '~' : '?';

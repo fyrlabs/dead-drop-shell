@@ -21,7 +21,8 @@
     }
   ],
   "shell": {
-    "allowControllers": ["laptop"],
+    "authorizedKeysFile": "~/.deaddrop/ddshell_authorized_keys",
+    "hostKey": "~/.deaddrop/ddshell_host_key",
     "shell": "/bin/bash",
     "outputCapBytes": 8388608,
     "idleTimeoutMs": 1800000,

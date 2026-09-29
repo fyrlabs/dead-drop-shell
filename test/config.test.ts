@@ -8,6 +8,7 @@ import { parseRuntimeConfig } from '@fyrlabs/dead-drop/runtime';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { loadConfig, parseShellConfig } from '../src/config.js';
+import { formatPublicKey, generateKeyPair } from '../src/keys.js';
 
 const examples = fileURLToPath(new URL('../examples/', import.meta.url));
 let home: string;
@@ -41,27 +42,76 @@ const runtime = () =>
 
 describe('config', () => {
   it('loads the shipped examples', async () => {
+    const deaddrop = join(home, '.deaddrop');
     const server = await loadConfig(join(examples, 'server.json'));
     expect(server.shell).toMatchObject({
-      allowControllers: ['laptop'],
+      authorizedKeys: [],
+      authorizedKeysFile: join(deaddrop, 'ddshell_authorized_keys'),
+      allowControllers: [],
+      hostKey: join(deaddrop, 'ddshell_host_key'),
       shell: '/bin/bash',
       outputCapBytes: 8 * 1024 * 1024,
-      ledgerDir: join(home, '.deaddrop', 'ddshell-ledger'),
+      ledgerDir: join(deaddrop, 'ddshell-ledger'),
     });
+    const line = formatPublicKey(generateKeyPair(), 'laptop');
+    await writeFile(join(deaddrop, 'ddshell_authorized_keys'), `# controllers\n${line}\n\n`);
+    expect((await loadConfig(join(examples, 'server.json'))).shell.authorizedKeys).toEqual([line]);
     const controller = await loadConfig(join(examples, 'controller.json'));
-    expect(controller.shell.targets).toEqual({ vm: 'vm' });
-    expect(controller.shell.allowControllers).toEqual([]);
+    expect(controller.shell).toMatchObject({
+      targets: { vm: 'vm' },
+      key: join(deaddrop, 'ddshell_key'),
+      knownHosts: join(deaddrop, 'ddshell_known_hosts'),
+    });
     const demo = join(home, 'demo');
     await cp(join(examples, 'local'), demo, { recursive: true });
     await writeFile(join(demo, 'secret'), `${generateWorkspaceSecret()}\n`);
+    await writeFile(join(demo, 'authorized_keys'), `${line}\n`);
     const local = await loadConfig(join(demo, 'server.json'));
-    expect(local.shell.ledgerDir).toBe(join(demo, 'server-state', 'ddshell-ledger'));
-    expect((await loadConfig(join(demo, 'controller.json'))).shell.targets).toEqual({ vm: 'vm' });
+    expect(local.shell).toMatchObject({
+      authorizedKeys: [line],
+      hostKey: join(demo, 'server-state', 'host_key'),
+      ledgerDir: join(demo, 'server-state', 'ddshell-ledger'),
+    });
+    expect((await loadConfig(join(demo, 'controller.json'))).shell).toMatchObject({
+      targets: { vm: 'vm' },
+      key: join(demo, 'controller_key'),
+      knownHosts: join(demo, 'known_hosts'),
+    });
+  });
+
+  it('names the bad line of an authorized keys file', async () => {
+    const path = join(home, 'config.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        workspaces: [
+          {
+            name: 'w',
+            peerId: 'p',
+            secrets: [generateWorkspaceSecret()],
+            transports: [{ use: 'memory' }],
+          },
+        ],
+        shell: { authorizedKeysFile: 'keys' },
+      }),
+    );
+    await writeFile(
+      join(home, 'keys'),
+      `# ok\n${formatPublicKey(generateKeyPair())}\nssh-ed25519 AAAA\n`,
+    );
+    await expect(loadConfig(path)).rejects.toThrow(/keys line 3: not a ddshell public key/);
   });
 
   it('applies defaults', () => {
     expect(parseShellConfig(undefined, runtime(), '/etc')).toEqual({
+      authorizedKeys: [],
+      allowV1: false,
       allowControllers: [],
+      hostKey: '/etc/ddshell_host_key',
+      replayWindowMs: 10 * 60_000,
+      key: '/etc/ddshell_key',
+      knownHosts: '/etc/ddshell_known_hosts',
+      strictHostKeys: false,
       shell: '/bin/sh',
       outputCapBytes: 8 * 1024 * 1024,
       idleTimeoutMs: 30 * 60_000,
@@ -76,6 +126,12 @@ describe('config', () => {
 
   it.each([
     [{ allowControllers: 'laptop' }, /allowControllers/],
+    [{ authorizedKeys: 'ddshell-key x' }, /authorizedKeys/],
+    [{ authorizedKeys: ['ssh-ed25519 AAAA'] }, /key/],
+    [{ allowV1: 'yes' }, /allowV1/],
+    [{ strictHostKeys: 1 }, /strictHostKeys/],
+    [{ knownHosts: 3 }, /knownHosts/],
+    [{ replayWindowMs: 0 }, /replayWindowMs/],
     [{ shell: 'bash' }, /absolute path/],
     [{ outputCapBytes: 0 }, /outputCapBytes/],
     [{ targets: { vm: 3 } }, /targets/],

@@ -9,5 +9,5 @@
       "transports": [{ "use": "filesystem", "config": { "root": "./store" } }]
     }
   ],
-  "shell": { "targets": { "vm": "vm" } }
+  "shell": { "key": "./controller_key", "knownHosts": "./known_hosts", "targets": { "vm": "vm" } }
 }

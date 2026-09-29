@@ -6,6 +6,7 @@ import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
 
 import { ShellClient } from './client.js';
 import { loadConfig, resolvePath } from './config.js';
+import { KnownHosts, parsePublicKey, readKeyPair } from './keys.js';
 import { SHELL_CHANNEL } from './protocol.js';
 
 export interface Finding {
@@ -18,8 +19,9 @@ const FILE_REFERENCE = /^\$\{file:(.+)\}$/;
 
 /**
  * Checks a config the way the server or controller would use it: the file
- * parses, its secret files are private, a server's shell and ledger are
- * usable, every transport can be listed, and each target has announced itself.
+ * parses, its secret files and keys are private, a server's shell, ledger and
+ * host key are usable, every transport can be listed, and each target has
+ * announced itself.
  * Starting the runtime costs what any `exec` costs, and nothing is sent.
  */
 export async function check(path: string, debug = false): Promise<Finding[]> {
@@ -48,13 +50,21 @@ export async function check(path: string, debug = false): Promise<Finding[]> {
     }
   }
 
-  const { allowControllers, targets } = config.shell;
-  const serving = allowControllers.length > 0;
+  const { authorizedKeys, allowV1, allowControllers, targets } = config.shell;
+  const v1 = allowV1 && allowControllers.length > 0;
+  const serving = authorizedKeys.length > 0 || v1;
   if (!serving && Object.keys(targets).length === 0) {
     add(
       'warn',
       'shell',
-      'neither shell.allowControllers (server) nor shell.targets (controller) is set',
+      'neither shell.authorizedKeys (server) nor shell.targets (controller) is set',
+    );
+  }
+  if (allowControllers.length > 0 && !allowV1) {
+    add(
+      'warn',
+      'shell',
+      'shell.allowControllers is ignored unless shell.allowV1 is true; authorise controllers by key in shell.authorizedKeys',
     );
   }
   if (serving) {
@@ -67,7 +77,45 @@ export async function check(path: string, debug = false): Promise<Finding[]> {
     const ledger = await writableAncestor(config.shell.ledgerDir);
     if (ledger.ok) add('ok', 'server', `ledger ${config.shell.ledgerDir} can be written`);
     else add('fail', 'server', `ledger ${config.shell.ledgerDir}: ${ledger.reason}`);
-    add('ok', 'server', `allows ${allowControllers.join(', ')}`);
+    const keys = authorizedKeys.map((line) => {
+      const { fingerprint, comment } = parsePublicKey(line);
+      return comment ? `${comment} (${fingerprint})` : fingerprint;
+    });
+    if (keys.length > 0) add('ok', 'server', `authorises ${keys.join(', ')}`);
+    if (v1) {
+      add(
+        'warn',
+        'server',
+        `shell.allowV1 lets in ${allowControllers.join(', ')} by peer id, which anyone holding the workspace secret can claim`,
+      );
+    }
+    await readKeyPair(config.shell.hostKey).then(
+      (host) => add('ok', 'server', `host key ${config.shell.hostKey}: ${host.fingerprint}`),
+      async (error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          add('fail', 'server', `host key: ${describe(error)}`);
+          return;
+        }
+        const dir = await writableAncestor(dirname(config.shell.hostKey));
+        if (dir.ok) add('ok', 'server', `host key ${config.shell.hostKey} is made on first start`);
+        else add('fail', 'server', `host key ${config.shell.hostKey}: ${dir.reason}`);
+      },
+    );
+  }
+
+  const names = Object.keys(targets);
+  if (names.length > 0) {
+    await readKeyPair(config.shell.key).then(
+      (key) => add('ok', 'key', `${config.shell.key}: ${key.fingerprint}`),
+      (error: unknown) =>
+        (error as NodeJS.ErrnoException).code === 'ENOENT'
+          ? add(
+              'warn',
+              'key',
+              `no key at ${config.shell.key}, so requests go unsigned (protocol v1), which servers refuse unless they set shell.allowV1. Run ddshell keygen`,
+            )
+          : add('fail', 'key', describe(error)),
+    );
   }
 
   let client: ShellClient;
@@ -86,8 +134,8 @@ export async function check(path: string, debug = false): Promise<Finding[]> {
       else add('ok', 'transport', `${transport.name} (${transport.kind}) can be listed`);
     }
 
-    const names = Object.keys(targets);
     if (names.length > 0) {
+      const knownHosts = new KnownHosts(config.shell.knownHosts);
       const { peers } = await client.workspace.discoverPeers();
       for (const name of names) {
         const peer = targets[name]!;
@@ -110,6 +158,20 @@ export async function check(path: string, debug = false): Promise<Finding[]> {
         } else {
           const age = Math.max(0, Math.round((Date.now() - record.announcedAt) / 1000));
           add('ok', subject, `peer ${peer} serves ${SHELL_CHANNEL}, announced ${age}s ago`);
+        }
+        const pinned = await knownHosts.get(peer).catch((error: unknown) => {
+          add('fail', subject, `${config.shell.knownHosts}: ${describe(error)}`);
+          return null;
+        });
+        if (pinned) add('ok', subject, `host key pinned: ${pinned.fingerprint}`);
+        else if (pinned === undefined) {
+          add(
+            config.shell.strictHostKeys ? 'warn' : 'ok',
+            subject,
+            config.shell.strictHostKeys
+              ? `no host key pinned in ${config.shell.knownHosts} and shell.strictHostKeys is on; add the line ddshell hostkey prints on the server`
+              : 'host key not pinned yet; the first request pins it',
+          );
         }
       }
     }

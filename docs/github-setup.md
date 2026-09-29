@@ -57,7 +57,7 @@ chmod 600 ~/.deaddrop/ddshell.secret
 
 Copy that file to `/home/ddshell/.deaddrop/ddshell.secret` on the VM over a channel you already trust (an existing SSH session, a password manager, a cloud secret store). **Never commit it and never send it through the Git repository.** Owner `ddshell`, mode 0600.
 
-Anyone holding the secret and the current key era is trusted broadly by dead-drop: they can read and write every message in the workspace and claim any peer id. `allowControllers` checks the identity dead-drop authenticated, but the secret is what makes that identity mean anything. That is why this workspace, repository and secret should be dedicated to the shell.
+Anyone holding the secret and the current key era is trusted broadly by dead-drop: they can read and write every message in the workspace and claim any peer id. ddshell does not rely on that identity: every request is signed with the controller's own key, and commands and output are sealed so the other members cannot read them. A secret holder can still drop or delay messages, so this workspace, repository and secret should be dedicated to the shell.
 
 ## 5. Install and configure
 
@@ -67,7 +67,16 @@ On both machines:
 npm install -g @fyrlabs/dead-drop-shell
 ```
 
-On the VM, copy [examples/server.json](../examples/server.json) to `/home/ddshell/.deaddrop/ddshell.json` and set `remote` to the repository's clone URL. On your machine, copy [examples/controller.json](../examples/controller.json) to `~/.deaddrop/ddshell.json` and set `repo` to the same repository as `owner/name`. The two transports read and write the same branch, so a `git` server and a `github` controller talk to each other; keep `branch` and `prefix` at their defaults on both, or set them to the same values. The peer ids must match: the controller's `peerId` must appear in the server's `allowControllers`, and the controller's `targets` must point at the server's `peerId`.
+On the VM, copy [examples/server.json](../examples/server.json) to `/home/ddshell/.deaddrop/ddshell.json` and set `remote` to the repository's clone URL. On your machine, copy [examples/controller.json](../examples/controller.json) to `~/.deaddrop/ddshell.json` and set `repo` to the same repository as `owner/name`. The two transports read and write the same branch, so a `git` server and a `github` controller talk to each other; keep `branch` and `prefix` at their defaults on both, or set them to the same values. The controller's `targets` must point at the server's `peerId`.
+
+Make your key on your machine and let it in on the VM:
+
+```bash
+ddshell keygen                                   # on your machine; prints one "ddshell-key ..." line
+echo 'ddshell-key ... you@laptop' >> /home/ddshell/.deaddrop/ddshell_authorized_keys   # on the VM, that line
+```
+
+The first command you run pins the VM's host key in `~/.deaddrop/ddshell_known_hosts` and prints its fingerprint. To check it, run `ddshell hostkey --config /home/ddshell/.deaddrop/ddshell.json` on the VM and compare; to skip trust on first use, put that line in `ddshell_known_hosts` yourself and set `"strictHostKeys": true`.
 
 Try the server in the foreground first:
 
@@ -102,4 +111,4 @@ ddshell vm
 
 ## Removing a controller
 
-Taking a name out of `allowControllers` stops the server from serving it, but anyone still holding the current key era can claim any peer id, including one that is still allowed. Real removal is dead-drop's: set `"enrollment": { "requireApproval": true }` on the workspace, approve the peers that stay, then run `ddrop peer revoke <peer>` and `ddrop rotate`. Read dead-drop's security model (`docs/security-model.md`) before relying on it; the removed peer can still read everything written before the rotation. The server re-reads its config only on restart.
+Delete the controller's line from `ddshell_authorized_keys` and restart the server; its key is refused from then on, even though it still holds the workspace secret. It cannot read other controllers' traffic, but it can still drop or delay messages until you rotate the secret with dead-drop (`ddrop peer revoke <peer>` and `ddrop rotate`, see dead-drop's `docs/security-model.md`). The server re-reads its config only on restart.

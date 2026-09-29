@@ -22,9 +22,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { ShellClient } from '../src/client.js';
 import { parseShellConfig } from '../src/config.js';
-import { SHELL_CHANNEL, type TransferOpened } from '../src/protocol.js';
+import { type ShellRequest, type TransferOpened } from '../src/protocol.js';
 import { ShellServer } from '../src/server.js';
-import { waitFor } from './helpers.js';
+import { keyLines, waitFor } from './helpers.js';
 
 let root: string;
 let home: string;
@@ -64,9 +64,10 @@ function runtimeConfig(peerId: string): RuntimeConfig {
 
 async function start(fields: Record<string, unknown> = {}): Promise<ShellClient> {
   const serverRuntime = runtimeConfig('vm');
+  const authorizedKeys = await keyLines(root, ['laptop']);
   const shell = (runtime: RuntimeConfig) =>
     parseShellConfig(
-      { allowControllers: ['laptop'], transferChunkBytes: 1000, ...fields },
+      { authorizedKeys, key: join(root, 'laptop.key'), transferChunkBytes: 1000, ...fields },
       runtime,
       root,
     );
@@ -81,6 +82,10 @@ async function start(fields: Record<string, unknown> = {}): Promise<ShellClient>
   cleanup.push(() => client.stop());
   return client;
 }
+
+/** One transfer step by hand, signed like any other request. */
+const raw = <T>(client: ShellClient, request: Record<string, unknown>) =>
+  client.call<T>('vm', { v: 1, ...request } as unknown as ShellRequest, { timeoutMs: 10_000 });
 
 const sha256 = (data: Buffer) => createHash('sha256').update(data).digest('hex');
 const temporaries = async (directory: string) =>
@@ -178,8 +183,7 @@ describe('file transfer', () => {
   it('refuses a commit whose bytes do not match, answers duplicates alike, and keeps the old file', async () => {
     const client = await start();
     await writeFile(join(home, 'target'), 'original');
-    const call = <T>(request: Record<string, unknown>) =>
-      client.workspace.call<T>('vm', SHELL_CHANNEL, { v: 1, ...request }, { timeoutMs: 10_000 });
+    const call = <T>(request: Record<string, unknown>) => raw<T>(client, request);
     const transferId = randomUUID();
     const open = {
       op: 'put-open',
@@ -210,26 +214,18 @@ describe('file transfer', () => {
   it('drops an abandoned upload and its temporary file after the idle timeout', async () => {
     const client = await start({ idleTimeoutMs: 100 });
     const transferId = randomUUID();
-    await client.workspace.call(
-      'vm',
-      SHELL_CHANNEL,
-      {
-        v: 1,
-        op: 'put-open',
-        transferId,
-        path: 'left',
-        name: 'left',
-        size: 1,
-        sha256: sha256(Buffer.from('x')),
-        mode: 0o600,
-      },
-      { timeoutMs: 10_000 },
-    );
+    await raw(client, {
+      op: 'put-open',
+      transferId,
+      path: 'left',
+      name: 'left',
+      size: 1,
+      sha256: sha256(Buffer.from('x')),
+      mode: 0o600,
+    });
     expect(await temporaries(home)).toHaveLength(1);
     await waitFor(() => !existsSync(join(home, `.left.ddshell-${transferId}.tmp`)));
-    const error = await client.workspace
-      .call('vm', SHELL_CHANNEL, { v: 1, op: 'put-commit', transferId }, { timeoutMs: 10_000 })
-      .catch((e: unknown) => e);
+    const error = await raw(client, { op: 'put-commit', transferId }).catch((e: unknown) => e);
     expect(error).toMatchObject({ code: 'NOT_FOUND' });
   });
 
@@ -291,8 +287,7 @@ describe('file transfer', () => {
 
   it('moves a file that fits one chunk in a single request each way', async () => {
     const client = await start();
-    const call = <T>(request: Record<string, unknown>) =>
-      client.workspace.call<T>('vm', SHELL_CHANNEL, { v: 1, ...request }, { timeoutMs: 10_000 });
+    const call = <T>(request: Record<string, unknown>) => raw<T>(client, request);
     const data = Buffer.from('inline');
     const put = await call<TransferOpened>({
       op: 'put-open',
@@ -319,21 +314,13 @@ describe('file transfer', () => {
 
   it('refuses a directory path that climbs out of the copy', async () => {
     const client = await start();
-    const error = await client.workspace
-      .call(
-        'vm',
-        SHELL_CHANNEL,
-        {
-          v: 1,
-          op: 'mkdir',
-          path: 'x',
-          name: 'x',
-          mode: 0o755,
-          dirs: [{ path: '../y', mode: 0o755 }],
-        },
-        { timeoutMs: 10_000 },
-      )
-      .catch((e: unknown) => e);
+    const error = await raw(client, {
+      op: 'mkdir',
+      path: 'x',
+      name: 'x',
+      mode: 0o755,
+      dirs: [{ path: '../y', mode: 0o755 }],
+    }).catch((e: unknown) => e);
     expect(error).toMatchObject({ code: 'BAD_REQUEST' });
     expect(existsSync(join(home, 'x'))).toBe(false);
   });

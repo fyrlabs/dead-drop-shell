@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Breaking:** controllers now sign in with their own key instead of a peer id. Run `ddshell keygen` on each controller and add the line it prints to the server's `shell.authorizedKeys` or `shell.authorizedKeysFile`. Old controllers are refused unless the server sets `shell.allowV1`.
+- Commands and output are sealed end to end, so other members of the workspace can no longer read them.
+- The controller remembers each server's host key on first contact and refuses one that changes, like ssh. `ddshell hostkey` prints a server's key so you can trust it up front with `shell.strictHostKeys`.
+- Output and file transfers no longer go through base64, so they are a third smaller on the wire.
 - `--session <name>` keeps a shell you can come back to, like a tmux session: `ddshell vm --session build` joins it where you left it, `ddshell exec vm --session build -- make` runs in it, and leaving keeps it open. `ddshell sessions vm` lists your live sessions.
 - `ddshell put`, `ddshell get` and scp-style `ddshell cp vm:path local` copy files. Each copy is checked with sha256 and lands whole or not at all. Files up to 64 MiB by default, sent in pieces.
 - `-r` on `put`, `get` and `cp` copies whole directories, as `scp -r` does. Small files take one round trip each.

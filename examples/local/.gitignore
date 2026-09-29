@@ -2,3 +2,7 @@ secret
 server-state/
 controller-state/
 store/
+authorized_keys
+controller_key
+controller_key.pub
+known_hosts

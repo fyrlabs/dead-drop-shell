@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,9 +14,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ShellServer } from '../src/server.js';
 import { ShellClient, type RemoteSession } from '../src/client.js';
 import { parseShellConfig, type ShellConfig } from '../src/config.js';
+import { formatPublicKey, parsePublicKey, readKeyPair } from '../src/keys.js';
 import { JobLedger } from '../src/ledger.js';
 import { isJobId, namedSessionId, type ExecResponse, type JobResult } from '../src/protocol.js';
-import { isAlive, waitFor } from './helpers.js';
+import { isAlive, keyLines, waitFor } from './helpers.js';
 
 let root: string;
 let home: string;
@@ -53,7 +54,13 @@ function runtimeConfig(peerId: string): RuntimeConfig {
 
 function shellConfig(runtime: RuntimeConfig, fields: Record<string, unknown> = {}): ShellConfig {
   return parseShellConfig(
-    { allowControllers: ['laptop'], targets: { vm: 'vm' }, ...fields },
+    {
+      targets: { vm: 'vm' },
+      key: join(root, `${runtime.workspaces[0]!.peerId}.key`),
+      knownHosts: join(root, `${runtime.workspaces[0]!.peerId}.known_hosts`),
+      hostKey: join(root, `${runtime.workspaces[0]!.peerId}.host_key`),
+      ...fields,
+    },
     runtime,
     root,
   );
@@ -61,14 +68,30 @@ function shellConfig(runtime: RuntimeConfig, fields: Record<string, unknown> = {
 
 async function startServer(fields: Record<string, unknown> = {}): Promise<ShellServer> {
   const runtime = runtimeConfig('vm');
-  const server = await ShellServer.start({ runtime, shell: shellConfig(runtime, fields), home });
+  // Tests name controllers by peer id; each gets its own key.
+  const { allowControllers = ['laptop'], ...rest } = fields as { allowControllers?: string[] };
+  const authorizedKeys = await keyLines(root, allowControllers);
+  const server = await ShellServer.start({
+    runtime,
+    shell: shellConfig(runtime, { authorizedKeys, allowControllers, ...rest }),
+    home,
+  });
   cleanup.push(() => server.stop());
   return server;
 }
 
-async function startClient(peerId = 'laptop'): Promise<ShellClient> {
+/** `v1` leaves the controller without a key, so it speaks protocol v1. */
+async function startClient(
+  peerId = 'laptop',
+  { v1 = false, ...fields }: { v1?: boolean } & Record<string, unknown> = {},
+): Promise<ShellClient> {
   const runtime = runtimeConfig(peerId);
-  const client = await ShellClient.start({ runtime, shell: shellConfig(runtime) });
+  if (!v1) await keyLines(root, [peerId]);
+  const shell = shellConfig(runtime, {
+    ...(v1 ? { key: join(root, `${peerId}.nokey`) } : {}),
+    ...fields,
+  });
+  const client = await ShellClient.start({ runtime, shell });
   cleanup.push(() => client.stop());
   return client;
 }
@@ -187,6 +210,61 @@ describe('ddshell over the filesystem transport', () => {
     await expect(readFile(join(home, 'pwned'))).rejects.toThrow();
   });
 
+  it('refuses protocol v1 unless allowV1, and says how to fix it', async () => {
+    const strict = await startServer();
+    const refused = await (
+      await startClient('laptop', { v1: true })
+    )
+      .session('vm')
+      .exec('touch pwned', { timeoutMs: 10_000 })
+      .catch((caught: unknown) => caught);
+    expect(DeadDropError.is(refused) && refused.code).toBe('UNAUTHORIZED');
+    expect((refused as Error).message).toMatch(/ddshell keygen/);
+    await expect(readFile(join(home, 'pwned'))).rejects.toThrow();
+
+    await strict.stop();
+    await startServer({ allowV1: true });
+    const old = (await startClient('laptop', { v1: true })).session('vm');
+    expect((await run(old, 'echo v1')).out).toBe('v1\n');
+  });
+
+  it('refuses a server whose host key changed, and says where the pin is', async () => {
+    const first = await startServer();
+    const client = await startClient();
+    expect((await run(client.session('vm'), 'echo pinned')).out).toBe('pinned\n');
+    await first.stop();
+    await rm(join(root, 'vm.host_key'));
+    await startServer();
+    const error = await (
+      await startClient()
+    )
+      .session('vm')
+      .exec('touch pwned', { timeoutMs: 10_000 })
+      .catch((caught: unknown) => caught);
+    expect(DeadDropError.is(error) && error.code).toBe('UNAUTHORIZED');
+    expect((error as Error).message).toContain(
+      `host key changed. If that was deliberate, remove the vm line from ${join(root, 'laptop.known_hosts')}`,
+    );
+    await expect(readFile(join(home, 'pwned'))).rejects.toThrow();
+  });
+
+  it('with strictHostKeys, talks only to a server pinned beforehand', async () => {
+    await startServer();
+    const strict = await startClient('laptop', { strictHostKeys: true });
+    const error = await strict
+      .session('vm')
+      .exec('touch pwned', { timeoutMs: 10_000 })
+      .catch((caught: unknown) => caught);
+    expect(DeadDropError.is(error) && error.code).toBe('UNAUTHORIZED');
+    expect((error as Error).message).toMatch(/no host key for vm in .*ddshell hostkey/);
+    await expect(readFile(join(home, 'pwned'))).rejects.toThrow();
+
+    const host = await readKeyPair(join(root, 'vm.host_key'));
+    await writeFile(join(root, 'laptop.known_hosts'), `vm ${formatPublicKey(host)}\n`);
+    const pinned = await startClient('laptop', { strictHostKeys: true });
+    expect((await run(pinned.session('vm'), 'echo trusted')).out).toBe('trusted\n');
+  });
+
   it('replays a duplicate completed job without running it again', async () => {
     await startServer();
     const session = (await startClient()).session('vm');
@@ -204,9 +282,10 @@ describe('ddshell over the filesystem transport', () => {
     const jobId = randomUUID();
     const ledger = new JobLedger<JobResult>(join(root, 'vm-state', 'ddshell-ledger'), 60_000);
     await ledger.open();
+    const [line] = await keyLines(root, ['laptop']);
     await ledger.put({
       jobId,
-      identity: 'laptop',
+      identity: `key:${parsePublicKey(line!).fingerprint}`,
       sessionId: randomUUID(),
       state: 'running',
       startedAt: Date.now(),
@@ -270,7 +349,11 @@ describe('ddshell over the filesystem transport', () => {
         throw new DeadDropError('BAD_REQUEST', 'sessionId must be a UUID');
       },
     });
-    const { result } = await (await startClient()).ping('old', { timeoutMs: 10_000 });
+    const { result } = await (
+      await startClient('laptop', { v1: true })
+    ).ping('old', {
+      timeoutMs: 10_000,
+    });
     expect(result).toBeUndefined();
   });
 
@@ -321,7 +404,7 @@ describe('ddshell over the filesystem transport', () => {
       },
     });
     await expect(
-      (await startClient()).sessions('old', { timeoutMs: 10_000 }),
+      (await startClient('laptop', { v1: true })).sessions('old', { timeoutMs: 10_000 }),
     ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
   });
 

@@ -4,7 +4,7 @@
 controller process                           server process (restricted OS account)
 ┌────────────────────────┐                  ┌──────────────────────────────────────┐
 │ ddshell <target>       │                  │ ddshell serve                        │
-│  RemoteSession         │   shell.v1       │  ShellServer ── allowControllers     │
+│  RemoteSession         │   shell.v2       │  ShellServer ── authorizedKeys       │
 │  embedded runtime ─────┼── dead-drop ─────┼─ embedded runtime                    │
 │  (own mailbox address) │   workspace      │  JobLedger (one file per job)        │
 └────────────────────────┘                  │  ShellSession ── /bin/sh, per session│
@@ -13,10 +13,20 @@ controller process                           server process (restricted OS accou
 
 Both ends embed a `DeadDropRuntime` built from the same kind of config file. Nothing needs a separate `ddrop start`. The client runs its runtime under a per-process mailbox address (dead-drop's `sessionId`), so it can share a config with a long-running `ddrop start` on the same machine, while the server still sees the configured peer id as the caller's identity.
 
+## Identity and sealing
+
+A controller with a key (`shell.key`, made by `ddshell keygen`) speaks `shell.v2`; one without speaks `shell.v1`, which a server serves only with `allowV1`. Both carry the same operations. v2 wraps each one in an envelope (`src/envelope.ts`), sent with dead-drop's raw `workspace.request` as binary with content type `application/vnd.ddshell.sealed`:
+
+- A key is an Ed25519 signing key plus an X25519 key, written as `ddshell-key <base64 of both>`; its fingerprint is `SHA256:` plus the base64 sha256, as in ssh.
+- On first contact with a server the client sends a `hello` with a nonce. The server answers with its host key, signed over the nonce and its peer id, and the client pins it in `knownHosts`. With `strictHostKeys` there is no hello: an unknown server is refused.
+- A request is sealed to the host key (ephemeral X25519, HKDF-SHA256, AES-256-GCM) and signed by the controller over the header (client and host fingerprints, timestamp, nonce) and the ciphertext. The server refuses an unknown key, a host fingerprint other than its own, a timestamp outside `replayWindowMs`, or a nonce it has already seen. Nonces are kept in `replay.log` in the ledger directory, so a restart does not reopen the window.
+- The answer, errors included, is sealed to the controller's key and signed by the host key over the request's signature, so it cannot be moved onto another request. Refusals before the request is opened (unknown key, bad signature, replay) are plain dead-drop errors and unauthenticated.
+- `stdout`, `stderr` and transfer `data`, base64 strings in v1, go as raw bytes after the envelope header.
+
 ## Request path
 
-1. The client sends `{ v: 1, op: "exec", sessionId, jobId, command, open?, close? }` to `shell.v1` with `workspace.call`. `open` is set on a session's first command; `close` makes a one-shot `exec` a single round trip.
-2. The server checks `context.identity` against `shell.allowControllers`. It never looks at `context.from`, which is only the reply address.
+1. The client sends `{ v: 1, op: "exec", sessionId, jobId, command, open?, close? }`, sealed as above over v2 or as JSON to `shell.v1` with `workspace.call`. `open` is set on a session's first command; `close` makes a one-shot `exec` a single round trip.
+2. Over v2 the caller's identity is `key:<fingerprint>` of the key that signed. Over v1 the server checks `context.identity` against `shell.allowControllers`. It never looks at `context.from`, which is only the reply address.
 3. A job id already in flight waits for the first copy. A job id in the ledger is answered from it: `completed` returns the stored result with `replayed: true`, `unknown` returns `state: "unknown"`. A job id owned by another controller is refused.
 4. Otherwise the server finds the session keyed by (identity, sessionId), or opens one if `open` is set, or answers `session_lost`.
 5. `running` is written to the ledger, the command runs, and `completed` is written with the result before the answer goes back.

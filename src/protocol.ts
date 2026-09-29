@@ -9,6 +9,11 @@ import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
 export const SHELL_SERVICE = 'shell';
 export const SHELL_METHOD = 'v1';
 export const SHELL_CHANNEL = `${SHELL_SERVICE}.${SHELL_METHOD}`;
+/**
+ * The same operations, signed by the controller's key and sealed both ways.
+ * See src/envelope.ts. The operation shapes below keep `v: 1` inside it.
+ */
+export const SHELL_CHANNEL_V2 = `${SHELL_SERVICE}.v2`;
 
 export interface ExecRequest {
   v: 1;

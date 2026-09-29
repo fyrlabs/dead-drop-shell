@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
@@ -10,9 +11,11 @@ import {
 } from '@fyrlabs/dead-drop/runtime';
 
 import type { ShellConfig } from './config.js';
+import { answerHello, openRequest, ReplayGuard, sealAnswer } from './envelope.js';
+import { ensureKeyPair, parsePublicKey, type KeyPair, type PublicKey } from './keys.js';
 import { JobLedger } from './ledger.js';
 import {
-  SHELL_CHANNEL,
+  SHELL_CHANNEL_V2,
   SHELL_METHOD,
   SHELL_SERVICE,
   parseRequest,
@@ -69,6 +72,7 @@ export class ShellServer {
     { identity: string; result: Promise<ExecResponse> }
   >();
   private readonly allowed: Set<string>;
+  private readonly authorized: Map<string, PublicKey & { comment: string }>;
   private readonly home: string;
   private readonly transfers: ServerTransfers;
   private readonly env: NodeJS.ProcessEnv;
@@ -80,12 +84,20 @@ export class ShellServer {
     private readonly options: ServerOptions,
     private readonly ledger: JobLedger<JobResult>,
     runtime: DeadDropRuntime,
+    private readonly hostKey: KeyPair,
+    private readonly guard: ReplayGuard,
   ) {
     this.runtime = runtime;
     this.workspace = options.shell.workspace
       ? runtime.workspace(options.shell.workspace)
       : runtime.defaultWorkspace();
-    this.allowed = new Set(options.shell.allowControllers);
+    this.allowed = new Set(options.shell.allowV1 ? options.shell.allowControllers : []);
+    this.authorized = new Map(
+      options.shell.authorizedKeys.map((line) => {
+        const key = parsePublicKey(line);
+        return [key.fingerprint, key];
+      }),
+    );
     this.home = options.home ?? homedir();
     this.env = Object.fromEntries(
       Object.entries(process.env).filter(([name]) => !PRIVATE_ENV.test(name)),
@@ -105,6 +117,11 @@ export class ShellServer {
       options.shell.ledgerRetentionMs,
     );
     const { recovered } = await ledger.open();
+    const guard = new ReplayGuard(
+      join(options.shell.ledgerDir, 'replay.log'),
+      options.shell.replayWindowMs,
+    );
+    await guard.open();
 
     const config: RuntimeConfig = {
       ...options.runtime,
@@ -118,8 +135,17 @@ export class ShellServer {
       ...(options.baseDir ? { baseDir: options.baseDir } : {}),
       ...(options.logFormat ? { logFormat: options.logFormat } : {}),
     });
+    // Before the runtime starts: a request queued while the server was down is
+    // handled as soon as it does, and must not find the channel missing.
+    const peerId = (
+      config.workspaces.find(({ name }) => name === options.shell.workspace) ?? config.workspaces[0]
+    )?.peerId;
+    const hostKey = await ensureKeyPair(
+      options.shell.hostKey,
+      `ddshell-host ${peerId ?? ''}`.trim(),
+    );
     await runtime.start();
-    const server = new ShellServer(options, ledger, runtime);
+    const server = new ShellServer(options, ledger, runtime, hostKey, guard);
 
     for (const jobId of recovered) {
       server.runtime.logger.warn(
@@ -127,12 +153,20 @@ export class ShellServer {
         { jobId },
       );
     }
-    if (options.shell.allowControllers.length === 0) {
-      server.runtime.logger.warn('shell.allowControllers is empty: every request will be refused');
+    if (options.shell.authorizedKeys.length === 0 && server.allowed.size === 0) {
+      server.runtime.logger.warn('shell.authorizedKeys is empty: every request will be refused');
+    }
+    if (server.allowed.size > 0) {
+      server.runtime.logger.warn(
+        'shell.allowV1 is on: protocol v1 trusts peer ids, which any workspace member can claim',
+      );
     }
     server.workspace.service(SHELL_SERVICE, {
       [SHELL_METHOD]: (input, context) => server.handle(input, context),
     });
+    server.workspace.handle(SHELL_CHANNEL_V2, (payload, context) =>
+      server.handleSealed(payload, context),
+    );
     const interval = Math.max(10, Math.min(options.shell.idleTimeoutMs / 4, 30_000));
     // Deliberately not unref'd: dead-drop unrefs its own poll timers, and over
     // git or GitHub nothing else holds the event loop open between polls.
@@ -140,8 +174,12 @@ export class ShellServer {
     server.runtime.logger.info('shell server ready', {
       workspace: server.workspace.name,
       peerId: server.workspace.identity,
-      channel: SHELL_CHANNEL,
-      allowControllers: options.shell.allowControllers,
+      channel: SHELL_CHANNEL_V2,
+      hostKey: hostKey.fingerprint,
+      authorizedKeys: [...server.authorized.values()].map(({ fingerprint, comment }) =>
+        `${fingerprint} ${comment}`.trim(),
+      ),
+      ...(server.allowed.size > 0 ? { allowControllers: [...server.allowed] } : {}),
     });
     return server;
   }
@@ -161,21 +199,56 @@ export class ShellServer {
     await this.runtime.stop();
   }
 
-  private async handle(
-    input: unknown,
-    context: RequestContext,
-  ): Promise<ExecResponse | CloseResult | PingResult | SessionsResult | TransferResponse> {
+  /** Protocol v1: the caller is whoever dead-drop says it is. Off unless `allowV1`. */
+  private async handle(input: unknown, context: RequestContext): Promise<Answer> {
     // `identity` is the caller's configured peer id. `from` is only where the
     // reply goes and must never decide access.
     if (!this.allowed.has(context.identity)) {
-      this.runtime.logger.warn('refused shell request from a peer not in allowControllers', {
-        identity: context.identity,
-      });
+      this.runtime.logger.warn('refused shell.v1 request', { identity: context.identity });
       throw new DeadDropError(
         'UNAUTHORIZED',
-        `peer "${context.identity}" is not in this server's shell.allowControllers`,
+        this.options.shell.allowV1
+          ? `peer "${context.identity}" is not in this server's shell.allowControllers`
+          : `this server only accepts signed requests: run "ddshell keygen" on the controller and add its public key to the server's shell.authorizedKeys`,
       );
     }
+    return this.dispatch(context.identity, input);
+  }
+
+  /**
+   * Protocol v2: the caller is the key that signed the request. Refusals before
+   * the request is opened go back as plain dead-drop errors; everything after,
+   * errors included, goes back sealed to that key.
+   */
+  private async handleSealed(payload: Uint8Array, context: RequestContext): Promise<Uint8Array> {
+    let opened;
+    try {
+      opened = await openRequest(
+        payload,
+        this.hostKey,
+        (id) => this.authorized.get(id),
+        this.guard,
+      );
+    } catch (error) {
+      this.runtime.logger.warn('refused shell.v2 request', {
+        peer: context.identity,
+        error: DeadDropError.from(error, 'BAD_REQUEST').message,
+      });
+      throw error;
+    }
+    if (opened.kind === 'hello')
+      return answerHello(this.hostKey, this.workspace.identity, opened.nonce);
+    const identity = `key:${opened.client.fingerprint}`;
+    let outcome: { result: unknown } | { error: DeadDropError };
+    try {
+      outcome = { result: await this.dispatch(identity, opened.request) };
+    } catch (error) {
+      outcome = { error: DeadDropError.from(error, 'SERVICE_ERROR') };
+    }
+    return sealAnswer(outcome, opened.client, opened.sig, this.hostKey);
+  }
+
+  private async dispatch(identity: string, input: unknown): Promise<Answer> {
     if (this.stopping) {
       throw new DeadDropError('UNSUPPORTED', 'shell server is shutting down', { retryable: true });
     }
@@ -187,20 +260,20 @@ export class ShellServer {
         uptimeMs: Math.round(performance.now() - this.startedAt),
       };
     }
-    if (request.op === 'sessions') return this.list(context.identity);
+    if (request.op === 'sessions') return this.list(identity);
     if (request.op === 'list') return this.transfers.list(request.path);
     if (request.op === 'mkdir') return this.transfers.mkdir(request);
     if (request.op !== 'exec' && request.op !== 'close') {
-      return this.transfer(context.identity, request);
+      return this.transfer(identity, request);
     }
     if (request.op === 'close') {
-      const key = sessionKey(context.identity, request.sessionId);
+      const key = sessionKey(identity, request.sessionId);
       const entry = this.sessions.get(key);
       this.sessions.delete(key);
       await entry?.session.close();
       return { closed: entry !== undefined };
     }
-    return this.exec(context.identity, request);
+    return this.exec(identity, request);
   }
 
   /**
@@ -391,11 +464,16 @@ export class ShellServer {
       await session.close();
     }
     await this.transfers.sweep();
+    await this.guard.compact().catch((error: unknown) => {
+      this.runtime.logger.warn('replay log compaction failed', { error: String(error) });
+    });
     await this.ledger.prune().catch((error: unknown) => {
       this.runtime.logger.warn('ledger prune failed', { error: String(error) });
     });
   }
 }
+
+type Answer = ExecResponse | CloseResult | PingResult | SessionsResult | TransferResponse;
 
 interface Entry {
   identity: string;

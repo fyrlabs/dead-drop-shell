@@ -18,6 +18,8 @@ npm run format      # prettier --write
 | `src/session.ts`  | `ShellSession`: one long-lived child shell, nonce-delimited command trailer, output cap, timeouts    |
 | `src/ledger.ts`   | `JobLedger`: one JSON file per job id, atomic writes, `running` becomes `unknown` on open            |
 | `src/protocol.ts` | `shell.v1` request and response types, `parseRequest`                                                |
+| `src/keys.ts`     | key pairs (Ed25519 + X25519), `ddshell-key` lines, fingerprints, `KnownHosts`                        |
+| `src/envelope.ts` | `shell.v2`: hello, sealed and signed calls and answers, `ReplayGuard`                                |
 | `src/transfer.ts` | `ServerTransfers` (put/get state, temp file, commit, list, mkdir), `hashFile`, `destination`, `walk` |
 | `src/version.ts`  | `VERSION` and `DEAD_DROP_VERSION`, read from the package manifests                                   |
 | `src/config.ts`   | `shell` config section, defaults, `loadConfig`                                                       |
@@ -29,7 +31,10 @@ npm run format      # prettier --write
 
 ## Invariants: do not break these
 
-- Authorise on `context.identity`, never `context.from`. `from` is a reply address.
+- Over `shell.v2`, authorise on the key that signed the request; the caller's identity is `key:<fingerprint>`. Over `shell.v1`, authorise on `context.identity`, never `context.from`. `from` is a reply address.
+- `shell.v1` stays refused unless `allowV1`. Never let a dead-drop peer id stand in for a key.
+- Never answer a v2 request unsealed once it has been opened: errors after that point go back sealed and signed too. Never change the wire format or a signature transcript without a new protocol version.
+- Never overwrite a key file without `--force`, and never read a private key file other users can read.
 - Never rerun a job the ledger says is `running` or `unknown`. Unknown means unknown; do not report it as "not run".
 - Persist `running` before a command starts and `completed` before the answer is sent.
 - Never log or persist command text. Output may be persisted in the ledger only, never logged.

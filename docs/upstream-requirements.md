@@ -18,6 +18,12 @@ A controller and a long-running `ddrop start` on one machine share a peer id. dd
 
 `RequestContext.from` is a reply address and `identity` is the authenticated peer. Authorisation must use `identity`. The names make the wrong one easy to reach for; a host's permission layer should only ever hand plugins the identity.
 
+`identity` itself is only as strong as the workspace secret: any holder can claim any peer id. ddshell therefore brings its own per-controller Ed25519 keys, host keys and sealing (`src/envelope.ts`). Per-peer signing keys in dead-drop, with `identity` bound to them, would let a host drop that layer.
+
+## Binary payloads
+
+Resolved: `workspace.handle(channel, handler)` and `workspace.request(peer, channel, bytes, { headers: { accept } })` carry `Uint8Array` as is, which ddshell's v2 envelope uses to move output and file pieces without base64. Only `service()` and `call()` force JSON.
+
 ## Errors that survive the round trip
 
 `workspace.call` rethrows a remote `DeadDropError` with its code, which is what lets the CLI tell `UNAUTHORIZED` from `TIMEOUT`. `workspace.request` returns the error payload instead of throwing, which is easy to miss. A plugin API should expose one of these, not both.

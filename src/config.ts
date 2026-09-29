@@ -5,13 +5,40 @@ import { dirname, join, resolve } from 'node:path';
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
 import { parseRuntimeConfig, type RuntimeConfig } from '@fyrlabs/dead-drop/runtime';
 
+import { parsePublicKey } from './keys.js';
+
 export const DEFAULT_CONFIG_PATH = join(homedir(), '.deaddrop', 'ddshell.json');
 
 export interface ShellConfig {
   /** Workspace carrying shell traffic. Defaults to the first one. */
   workspace?: string;
-  /** Server: peer identities allowed to run commands. Empty refuses everyone. */
+  /**
+   * Server: public key lines (`ddshell-key <base64> [comment]`) of the
+   * controllers allowed in over protocol v2.
+   */
+  authorizedKeys: string[];
+  /**
+   * Server: a file of more such lines, one per line, `#` comments allowed. Read
+   * once at load and appended to `authorizedKeys`; a missing file adds none.
+   */
+  authorizedKeysFile?: string;
+  /**
+   * Server: also serve protocol v1, which trusts dead-drop peer ids. Any holder
+   * of the workspace secret can claim any peer id, so this is off by default.
+   */
+  allowV1: boolean;
+  /** Server: peer identities allowed in over protocol v1, when `allowV1` is on. */
   allowControllers: string[];
+  /** Server: host key file, made on first start. */
+  hostKey: string;
+  /** Server: how far a request's timestamp may be from this clock. */
+  replayWindowMs: number;
+  /** Controller: key file made by `ddshell keygen`. Without it the controller speaks v1. */
+  key: string;
+  /** Controller: host keys pinned per server peer id. */
+  knownHosts: string;
+  /** Controller: refuse a server whose host key is not in `knownHosts` yet, instead of pinning it. */
+  strictHostKeys: boolean;
   /** Server: POSIX shell each session runs. */
   shell: string;
   /** Server: stdout + stderr bytes kept per command. */
@@ -85,6 +112,21 @@ export function parseShellConfig(
   if (!Array.isArray(allow) || !allow.every((peer) => typeof peer === 'string' && peer !== '')) {
     fail('shell.allowControllers must be an array of peer ids');
   }
+  const authorizedKeys = source.authorizedKeys ?? [];
+  if (!Array.isArray(authorizedKeys) || !authorizedKeys.every((line) => typeof line === 'string')) {
+    fail('shell.authorizedKeys must be an array of public key lines');
+  }
+  authorizedKeys.forEach((line: string) => parsePublicKey(line));
+  for (const key of ['allowV1', 'strictHostKeys']) {
+    if (source[key] !== undefined && typeof source[key] !== 'boolean')
+      fail(`shell.${key} must be true or false`);
+  }
+  for (const key of ['authorizedKeysFile', 'hostKey', 'key', 'knownHosts']) {
+    if (source[key] !== undefined && typeof source[key] !== 'string')
+      fail(`shell.${key} must be a path`);
+  }
+  const file = (key: string, fallback: string) =>
+    resolvePath(typeof source[key] === 'string' ? (source[key] as string) : fallback, baseDir);
   const targets = source.targets ?? {};
   if (
     typeof targets !== 'object' ||
@@ -111,7 +153,17 @@ export function parseShellConfig(
 
   return {
     ...(typeof source.workspace === 'string' ? { workspace: source.workspace } : {}),
+    authorizedKeys: authorizedKeys as string[],
+    ...(typeof source.authorizedKeysFile === 'string'
+      ? { authorizedKeysFile: resolvePath(source.authorizedKeysFile, baseDir) }
+      : {}),
+    allowV1: source.allowV1 === true,
     allowControllers: allow as string[],
+    hostKey: file('hostKey', 'ddshell_host_key'),
+    replayWindowMs: positive(source, 'replayWindowMs', 10 * 60_000),
+    key: file('key', 'ddshell_key'),
+    knownHosts: file('knownHosts', 'ddshell_known_hosts'),
+    strictHostKeys: source.strictHostKeys === true,
     shell,
     outputCapBytes: positive(source, 'outputCapBytes', 8 * MiB),
     idleTimeoutMs: positive(source, 'idleTimeoutMs', 30 * 60_000),
@@ -146,5 +198,32 @@ export async function loadConfig(path: string): Promise<LoadedConfig> {
   }
   const baseDir = dirname(resolve(path));
   const runtime = parseRuntimeConfig(raw, { baseDir });
-  return { runtime, shell: parseShellConfig(raw.shell, runtime, baseDir), baseDir };
+  const shell = parseShellConfig(raw.shell, runtime, baseDir);
+  if (shell.authorizedKeysFile) {
+    shell.authorizedKeys = [
+      ...shell.authorizedKeys,
+      ...(await readAuthorizedKeys(shell.authorizedKeysFile)),
+    ];
+  }
+  return { runtime, shell, baseDir };
+}
+
+async function readAuthorizedKeys(path: string): Promise<string[]> {
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw new DeadDropError('CONFIG_INVALID', `cannot read ${path}`, { cause: error });
+  }
+  return text.split('\n').flatMap((line, index) => {
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) return [];
+    try {
+      parsePublicKey(trimmed);
+    } catch (error) {
+      fail(`${path} line ${index + 1}: ${(error as Error).message}`);
+    }
+    return [trimmed];
+  });
 }

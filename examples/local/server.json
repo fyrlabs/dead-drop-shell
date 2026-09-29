@@ -8,5 +8,5 @@
       "transports": [{ "use": "filesystem", "config": { "root": "./store" } }]
     }
   ],
-  "shell": { "allowControllers": ["laptop"] }
+  "shell": { "authorizedKeysFile": "./authorized_keys", "hostKey": "./server-state/host_key" }
 }

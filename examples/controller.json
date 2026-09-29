@@ -20,6 +20,8 @@
     }
   ],
   "shell": {
+    "key": "~/.deaddrop/ddshell_key",
+    "knownHosts": "~/.deaddrop/ddshell_known_hosts",
     "targets": { "vm": "vm" }
   }
 }

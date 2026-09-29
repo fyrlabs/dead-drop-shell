@@ -3,12 +3,15 @@ import { open, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join, posix, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
-import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
+import { DeadDropError, decodeJson, isErrorPayload } from '@fyrlabs/dead-drop/protocol';
 import { DeadDropRuntime, type RuntimeConfig, type Workspace } from '@fyrlabs/dead-drop/runtime';
 
 import type { ShellConfig } from './config.js';
+import { helloRequest, openAnswer, openHello, SEALED_TYPE, sealCall } from './envelope.js';
+import { KnownHosts, readKeyPair, type KeyPair, type PublicKey } from './keys.js';
 import {
   SHELL_CHANNEL,
+  SHELL_CHANNEL_V2,
   type CloseRequest,
   type CloseResult,
   type ExecRequest,
@@ -25,6 +28,7 @@ import {
   type TransferOpened,
   type TreeEntry,
   type TransferRequest,
+  type ShellRequest,
   namedSessionId,
 } from './protocol.js';
 import { destination, hashFile, makeTree, temporaryPath, walk } from './transfer.js';
@@ -35,7 +39,21 @@ export interface ClientOptions {
   baseDir?: string;
   /** Show runtime logs at debug level instead of warnings only. */
   debug?: boolean;
+  /** Told when a server's host key is pinned on first use. */
+  onNewHost?: (peer: string, fingerprint: string) => void;
 }
+
+interface CallOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+/** Sends one shell request to `peer` and resolves to its answer. */
+export type ShellCall = <Result>(
+  peer: string,
+  request: ShellRequest,
+  options: CallOptions,
+) => Promise<Result>;
 
 /**
  * Commands wait on a git push, a poll and a second push, and then on the
@@ -89,13 +107,29 @@ export class ShellClient {
   // dead-drop unrefs its poll and timeout timers, and over git or GitHub nothing
   // else holds the event loop open, so Node would exit mid-request.
   private readonly keepAlive = setInterval(() => undefined, 1 << 30);
+  private readonly hosts = new Map<string, Promise<PublicKey>>();
+  private readonly knownHosts: KnownHosts;
+  readonly call: ShellCall;
 
   private constructor(
     readonly runtime: DeadDropRuntime,
     readonly workspace: Workspace,
-  ) {}
+    private readonly options: ClientOptions,
+    /** Without a key the client speaks protocol v1. */
+    readonly key: KeyPair | undefined,
+  ) {
+    this.knownHosts = new KnownHosts(options.shell.knownHosts);
+    this.call = key
+      ? (peer, request, callOptions) => this.sealed(key, peer, request, callOptions)
+      : (peer, request, callOptions) =>
+          this.workspace.call(peer, SHELL_CHANNEL, request, requestOptions(callOptions));
+  }
 
   static async start(options: ClientOptions): Promise<ShellClient> {
+    const key = await readKeyPair(options.shell.key).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    });
     const runtime = new DeadDropRuntime({
       config: { ...options.runtime, logLevel: options.debug ? 'debug' : 'silent' },
       sessionId: randomBytes(4).toString('hex'),
@@ -106,7 +140,84 @@ export class ShellClient {
     const workspace = options.shell.workspace
       ? runtime.workspace(options.shell.workspace)
       : runtime.defaultWorkspace();
-    return new ShellClient(runtime, workspace);
+    return new ShellClient(runtime, workspace, options, key);
+  }
+
+  /** Protocol v2: signed by this controller's key, sealed to the server's pinned host key. */
+  private async sealed<Result>(
+    key: KeyPair,
+    peer: string,
+    request: ShellRequest,
+    options: CallOptions,
+  ): Promise<Result> {
+    const host = await this.hostKey(peer, options);
+    const { bytes, sig } = sealCall(request as unknown as Record<string, unknown>, key, host);
+    const response = await this.workspace.request(peer, SHELL_CHANNEL_V2, bytes, {
+      ...requestOptions(options),
+      headers: { accept: SEALED_TYPE },
+    });
+    if (response.contentType !== SEALED_TYPE) throw this.refusal(peer, response.payload);
+    return openAnswer<Result>(response.payload, key, host, sig);
+  }
+
+  /**
+   * The host key pinned for `peer`, or, on first contact, the one it proves it
+   * holds, pinned from then on. A later change is refused, as ssh does.
+   */
+  private hostKey(peer: string, options: CallOptions): Promise<PublicKey> {
+    let pending = this.hosts.get(peer);
+    if (!pending) {
+      pending = this.pin(peer, options);
+      this.hosts.set(peer, pending);
+      pending.catch(() => this.hosts.delete(peer));
+    }
+    return pending;
+  }
+
+  private async pin(peer: string, options: CallOptions): Promise<PublicKey> {
+    const known = await this.knownHosts.get(peer);
+    if (known) return known;
+    if (this.options.shell.strictHostKeys) {
+      throw new DeadDropError(
+        'UNAUTHORIZED',
+        `no host key for ${peer} in ${this.options.shell.knownHosts}; add the line "ddshell hostkey" prints on the server`,
+      );
+    }
+    const { bytes, nonce } = helloRequest();
+    const response = await this.workspace.request(peer, SHELL_CHANNEL_V2, bytes, {
+      ...requestOptions(options),
+      headers: { accept: SEALED_TYPE },
+    });
+    if (response.contentType !== SEALED_TYPE) throw this.refusal(peer, response.payload);
+    const key = openHello(response.payload, peer, nonce);
+    await this.knownHosts.add(peer, key);
+    this.options.onNewHost?.(peer, key.fingerprint);
+    return key;
+  }
+
+  /** A plain dead-drop error: the server refused before it could seal an answer. */
+  private refusal(peer: string, payload: Uint8Array): DeadDropError {
+    const decoded = decodeJson(payload);
+    if (!isErrorPayload(decoded)) {
+      return new DeadDropError(
+        'DECODE_FAILED',
+        `${peer} sent an answer that is neither sealed nor an error`,
+      );
+    }
+    const error = DeadDropError.fromJSON(decoded.error);
+    if (error.code === 'NOT_FOUND' && error.message.includes(SHELL_CHANNEL_V2)) {
+      return new DeadDropError(
+        'UNSUPPORTED',
+        `${peer} runs ddshell without signed requests (protocol v2); upgrade it`,
+      );
+    }
+    if (/sealed to host key/.test(error.message)) {
+      return new DeadDropError(
+        'UNAUTHORIZED',
+        `${error.message}. The server's host key changed. If that was deliberate, remove the ${peer} line from ${this.options.shell.knownHosts}; otherwise something is impersonating it`,
+      );
+    }
+    return error;
   }
 
   /**
@@ -115,7 +226,7 @@ export class ShellClient {
    * one, instead of starting a shell.
    */
   session(peer: string, name?: string): RemoteSession {
-    return new RemoteSession(this.workspace, peer, name);
+    return new RemoteSession(this.call, peer, name);
   }
 
   /** The caller's live sessions on `peer`. */
@@ -125,10 +236,7 @@ export class ShellClient {
   ): Promise<SessionsResult> {
     const request: SessionsRequest = { v: 1, op: 'sessions' };
     try {
-      return await this.workspace.call<SessionsResult>(peer, SHELL_CHANNEL, request, {
-        timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
+      return await this.call<SessionsResult>(peer, request, options);
     } catch (error) {
       if (
         DeadDropError.is(error) &&
@@ -156,10 +264,7 @@ export class ShellClient {
     const request: PingRequest = { v: 1, op: 'ping' };
     let result: PingResult | undefined;
     try {
-      result = await this.workspace.call<PingResult>(peer, SHELL_CHANNEL, request, {
-        timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
+      result = await this.call<PingResult>(peer, request, options);
     } catch (error) {
       // Only the server's own request parser answers BAD_REQUEST, and 0.1.0's
       // refuses a ping before it gets as far as naming the operation.
@@ -387,10 +492,7 @@ export class ShellClient {
     for (let attempt = 1; ; attempt += 1) {
       try {
         // No `idempotencyKey`, for the same reason as `exec`.
-        return await this.workspace.call<Result>(peer, SHELL_CHANNEL, request, {
-          timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-          ...(options.signal ? { signal: options.signal } : {}),
-        });
+        return await this.call<Result>(peer, request, options);
       } catch (error) {
         const retry = attempt < TRANSFER_ATTEMPTS && DeadDropError.is(error) && error.retryable;
         if (!retry || options.signal?.aborted) throw error;
@@ -409,7 +511,7 @@ export class RemoteSession {
   private opened = false;
 
   constructor(
-    private readonly workspace: Workspace,
+    private readonly call: ShellCall,
     readonly peer: string,
     readonly name?: string,
   ) {
@@ -436,10 +538,7 @@ export class RemoteSession {
     };
     // No `idempotencyKey`: the mailbox would then drop a deliberate re-ask for
     // the same job as a duplicate. The server's ledger deduplicates jobs instead.
-    const response = await this.workspace.call<ExecResponse>(this.peer, SHELL_CHANNEL, request, {
-      timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
+    const response = await this.call<ExecResponse>(this.peer, request, options);
     this.opened = true;
     return response;
   }
@@ -447,7 +546,7 @@ export class RemoteSession {
   async close(timeoutMs = 30_000): Promise<void> {
     if (!this.opened) return;
     const request: CloseRequest = { v: 1, op: 'close', sessionId: this.id };
-    await this.workspace.call<CloseResult>(this.peer, SHELL_CHANNEL, request, { timeoutMs });
+    await this.call<CloseResult>(this.peer, request, { timeoutMs });
   }
 }
 
@@ -520,4 +619,11 @@ async function chunked(
     }
   };
   await Promise.all(Array.from({ length: TRANSFER_WINDOW }, worker));
+}
+
+function requestOptions(options: CallOptions): { timeoutMs: number; signal?: AbortSignal } {
+  return {
+    timeoutMs: options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+    ...(options.signal ? { signal: options.signal } : {}),
+  };
 }
