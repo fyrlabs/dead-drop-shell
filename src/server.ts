@@ -10,10 +10,12 @@ import {
   type Workspace,
 } from '@fyrlabs/dead-drop/runtime';
 
+import { AuditLog, type AuditEvent } from './audit.js';
 import type { ShellConfig } from './config.js';
 import { answerHello, openRequest, ReplayGuard, sealAnswer } from './envelope.js';
 import { ensureKeyPair, parsePublicKey, type KeyPair, type PublicKey } from './keys.js';
 import { JobLedger } from './ledger.js';
+import { RateLimiter } from './limits.js';
 import {
   SHELL_CHANNEL_V2,
   SHELL_METHOD,
@@ -76,6 +78,7 @@ export class ShellServer {
   private readonly home: string;
   private readonly transfers: ServerTransfers;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly limiter: RateLimiter;
   private readonly startedAt = performance.now();
   private sweeper: NodeJS.Timeout | undefined;
   private stopping = false;
@@ -86,6 +89,7 @@ export class ShellServer {
     runtime: DeadDropRuntime,
     private readonly hostKey: KeyPair,
     private readonly guard: ReplayGuard,
+    private readonly audit: AuditLog,
   ) {
     this.runtime = runtime;
     this.workspace = options.shell.workspace
@@ -108,6 +112,7 @@ export class ShellServer {
       chunkBytes: options.shell.transferChunkBytes,
       idleMs: options.shell.idleTimeoutMs,
     });
+    this.limiter = new RateLimiter(options.shell.requestsPerMinute);
   }
 
   static async start(options: ServerOptions): Promise<ShellServer> {
@@ -122,6 +127,10 @@ export class ShellServer {
       options.shell.replayWindowMs,
     );
     await guard.open();
+    const audit = new AuditLog(options.shell.auditLog, (error) =>
+      runtime.logger.warn('audit log write failed', { error: String(error) }),
+    );
+    await audit.open();
 
     const config: RuntimeConfig = {
       ...options.runtime,
@@ -145,7 +154,7 @@ export class ShellServer {
       `ddshell-host ${peerId ?? ''}`.trim(),
     );
     await runtime.start();
-    const server = new ShellServer(options, ledger, runtime, hostKey, guard);
+    const server = new ShellServer(options, ledger, runtime, hostKey, guard, audit);
 
     for (const jobId of recovered) {
       server.runtime.logger.warn(
@@ -197,6 +206,7 @@ export class ShellServer {
     await this.transfers.closeAll();
     this.sessions.clear();
     await this.runtime.stop();
+    await this.audit.flush();
   }
 
   /** Protocol v1: the caller is whoever dead-drop says it is. Off unless `allowV1`. */
@@ -205,6 +215,12 @@ export class ShellServer {
     // reply goes and must never decide access.
     if (!this.allowed.has(context.identity)) {
       this.runtime.logger.warn('refused shell.v1 request', { identity: context.identity });
+      this.record({
+        event: 'refused',
+        controller: context.identity,
+        code: 'UNAUTHORIZED',
+        reason: 'protocol v1',
+      });
       throw new DeadDropError(
         'UNAUTHORIZED',
         this.options.shell.allowV1
@@ -230,9 +246,17 @@ export class ShellServer {
         this.guard,
       );
     } catch (error) {
+      const refusal = DeadDropError.from(error, 'BAD_REQUEST');
       this.runtime.logger.warn('refused shell.v2 request', {
         peer: context.identity,
-        error: DeadDropError.from(error, 'BAD_REQUEST').message,
+        error: refusal.message,
+      });
+      // The key is not trusted yet, so the peer id is the best name there is.
+      this.record({
+        event: 'refused',
+        controller: `peer:${context.identity}`,
+        code: refusal.code,
+        reason: refusal.message,
       });
       throw error;
     }
@@ -251,6 +275,22 @@ export class ShellServer {
   private async dispatch(identity: string, input: unknown): Promise<Answer> {
     if (this.stopping) {
       throw new DeadDropError('UNSUPPORTED', 'shell server is shutting down', { retryable: true });
+    }
+    const waitMs = this.limiter.take(identity);
+    if (waitMs > 0) {
+      const { requestsPerMinute } = this.options.shell;
+      this.record({
+        event: 'refused',
+        controller: identity,
+        code: 'RATE_LIMITED',
+        reason: 'requestsPerMinute',
+      });
+      // Not retryable: an immediate retry would only be refused again.
+      throw new DeadDropError(
+        'RATE_LIMITED',
+        `more than ${requestsPerMinute} requests a minute from this controller (shell.requestsPerMinute); try again in ${Math.ceil(waitMs / 1000)} s`,
+        { retryable: false },
+      );
     }
     const request = parseRequest(input);
     if (request.op === 'ping') {
@@ -271,6 +311,9 @@ export class ShellServer {
       const entry = this.sessions.get(key);
       this.sessions.delete(key);
       await entry?.session.close();
+      if (entry) {
+        this.record({ event: 'session-close', controller: identity, sessionId: request.sessionId });
+      }
       return { closed: entry !== undefined };
     }
     return this.exec(identity, request);
@@ -302,10 +345,12 @@ export class ShellServer {
     if (existing) {
       if (existing.identity !== identity) throw foreignJob(jobId);
       this.runtime.logger.info('replaying recorded job', { jobId, state: existing.state });
-      if (existing.state === 'completed' && existing.result) {
-        return { ...existing.result, replayed: true };
-      }
-      return this.unknown(jobId);
+      const replayed =
+        existing.state === 'completed' && existing.result
+          ? { ...existing.result, replayed: true }
+          : this.unknown(jobId);
+      this.recordJob(identity, request.sessionId, replayed);
+      return replayed;
     }
 
     const key = sessionKey(identity, request.sessionId);
@@ -316,12 +361,33 @@ export class ShellServer {
     }
     if (!session) {
       if (!request.open) {
+        this.record({
+          event: 'exec',
+          controller: identity,
+          jobId,
+          sessionId: request.sessionId,
+          state: 'session_lost',
+        });
         return {
           jobId,
           state: 'session_lost',
           message:
             'this shell session no longer exists on the server (idle timeout, exit, or server restart); the command was not run',
         };
+      }
+      const { maxSessions } = this.options.shell;
+      if (this.live(identity).length >= maxSessions) {
+        this.record({
+          event: 'refused',
+          controller: identity,
+          code: 'RATE_LIMITED',
+          reason: 'maxSessions',
+        });
+        throw new DeadDropError(
+          'RATE_LIMITED',
+          `this controller already has ${maxSessions} open sessions (shell.maxSessions); close one, or let one reach the idle timeout, and try again. The command was not run`,
+          { retryable: false },
+        );
       }
       session = new ShellSession({
         shell: this.options.shell.shell,
@@ -341,6 +407,7 @@ export class ShellServer {
         sessionId: request.sessionId,
         pid: session.pid,
       });
+      this.record({ event: 'session-open', controller: identity, sessionId: request.sessionId });
     }
 
     const startedAt = Date.now();
@@ -389,6 +456,15 @@ export class ShellServer {
       truncated: outcome.truncated,
       timedOut: outcome.timedOut,
     });
+    this.recordJob(
+      identity,
+      request.sessionId,
+      result,
+      outcome.stdout.length + outcome.stderr.length,
+    );
+    if (result.sessionClosed) {
+      this.record({ event: 'session-close', controller: identity, sessionId: request.sessionId });
+    }
     return result;
   }
 
@@ -407,11 +483,13 @@ export class ShellServer {
       case 'put-commit': {
         const opened = await this.transfers.putCommit(identity, transferId);
         this.runtime.logger.info('file received', { identity, transferId, bytes: opened.size });
+        this.record({ event: 'put', controller: identity, transferId, bytes: opened.size });
         return opened;
       }
       case 'get-open': {
         const opened = await this.transfers.getOpen(identity, request);
         this.runtime.logger.info('file sending', { identity, transferId, bytes: opened.size });
+        this.record({ event: 'get', controller: identity, transferId, bytes: opened.size });
         return opened;
       }
       case 'get-chunk':
@@ -424,17 +502,45 @@ export class ShellServer {
   /** Only the caller's own sessions: another controller's are not its business. */
   private list(identity: string): SessionsResult {
     const now = performance.now();
-    const sessions = [...this.sessions.values()]
-      .filter((entry) => entry.identity === identity && !entry.session.closed)
-      .map(({ sessionId, name, session }) => ({
-        sessionId,
-        ...(name ? { name } : {}),
-        ...(session.pid ? { pid: session.pid } : {}),
-        cwd: session.cwd,
-        idleMs: session.busy ? 0 : Math.round(now - session.lastUsed),
-        busy: session.busy,
-      }));
+    const sessions = this.live(identity).map(({ sessionId, name, session }) => ({
+      sessionId,
+      ...(name ? { name } : {}),
+      ...(session.pid ? { pid: session.pid } : {}),
+      cwd: session.cwd,
+      idleMs: session.busy ? 0 : Math.round(now - session.lastUsed),
+      busy: session.busy,
+    }));
     return { home: this.home, sessions };
+  }
+
+  private live(identity: string): Entry[] {
+    return [...this.sessions.values()].filter(
+      (entry) => entry.identity === identity && !entry.session.closed,
+    );
+  }
+
+  /** Adds the key's comment, so a person reading the log need not look fingerprints up. */
+  private record(event: AuditEvent): void {
+    const name = event.controller.startsWith('key:')
+      ? this.authorized.get(event.controller.slice(4))?.comment
+      : undefined;
+    this.audit.record(name ? { ...event, name } : event);
+  }
+
+  private recordJob(identity: string, sessionId: string, result: JobResult, bytes?: number): void {
+    this.record({
+      event: 'exec',
+      controller: identity,
+      jobId: result.jobId,
+      sessionId,
+      state: result.state,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      ...(bytes === undefined ? {} : { bytes }),
+      truncated: result.truncated,
+      timedOut: result.timedOut,
+      replayed: result.replayed,
+    });
   }
 
   private unknown(jobId: string): JobResult {
@@ -456,13 +562,15 @@ export class ShellServer {
 
   private async sweep(): Promise<void> {
     const now = performance.now();
-    for (const [key, { session }] of this.sessions) {
+    for (const [key, { identity, sessionId, session }] of this.sessions) {
       if (session.busy) continue;
       if (!session.closed && now - session.lastUsed < this.options.shell.idleTimeoutMs) continue;
       this.sessions.delete(key);
       this.runtime.logger.info('shell session closed after idle timeout', { pid: session.pid });
       await session.close();
+      this.record({ event: 'session-close', controller: identity, sessionId });
     }
+    this.limiter.sweep();
     await this.transfers.sweep();
     await this.guard.compact().catch((error: unknown) => {
       this.runtime.logger.warn('replay log compaction failed', { error: String(error) });

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -416,5 +416,70 @@ describe('ddshell over the filesystem transport', () => {
     await startServer();
     const outcome = await pending.then(completed, (error: unknown) => error);
     expect(outcome).toMatchObject({ out: 'queued\n' });
+  });
+});
+
+describe('per-controller limits and the audit log', () => {
+  it('refuses a session past maxSessions without running the command', async () => {
+    await startServer({ maxSessions: 1, allowControllers: ['laptop', 'desktop'] });
+    const client = await startClient();
+    const first = client.session('vm');
+    await run(first, 'true');
+    const error = await client
+      .session('vm')
+      .exec('touch second', { timeoutMs: 10_000 })
+      .catch((caught: unknown) => caught);
+    expect(DeadDropError.is(error) && error.code).toBe('RATE_LIMITED');
+    expect(DeadDropError.is(error) && error.retryable).toBe(false);
+    expect((error as Error).message).toMatch(/shell\.maxSessions/);
+    await expect(readFile(join(home, 'second'))).rejects.toThrow();
+
+    await first.close();
+    expect((await run(client.session('vm'), 'echo ok')).out).toBe('ok\n');
+    // Another controller has its own allowance.
+    expect((await run((await startClient('desktop')).session('vm'), 'true')).exitCode).toBe(0);
+  });
+
+  it('refuses requests past requestsPerMinute and says when to try again', async () => {
+    await startServer({ requestsPerMinute: 2 });
+    const client = await startClient();
+    await client.ping('vm', { timeoutMs: 10_000 });
+    await client.ping('vm', { timeoutMs: 10_000 });
+    const error = await client.ping('vm', { timeoutMs: 10_000 }).catch((caught: unknown) => caught);
+    expect(DeadDropError.is(error) && error.code).toBe('RATE_LIMITED');
+    expect((error as Error).message).toMatch(/try again in \d+ s/);
+  });
+
+  it('records who ran what kind of thing, never the command or its output', async () => {
+    const server = await startServer();
+    const session = (await startClient()).session('vm');
+    await run(session, 'echo top-secret-output; exit 3');
+    await session.close();
+    const intruder = (await startClient('mallory')).session('vm');
+    await intruder.exec('true', { timeoutMs: 10_000 }).catch(() => undefined);
+
+    await server.stop(); // flushes the log
+    const path = join(root, 'vm-state', 'ddshell-audit.log');
+    const text = await readFile(path, 'utf8');
+    expect(text).not.toMatch(/top-secret|echo/);
+    const lines = text
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines.map((line) => line.event)).toEqual([
+      'session-open',
+      'exec',
+      'session-close',
+      'refused',
+    ]);
+    expect(lines[1]).toMatchObject({
+      name: 'laptop',
+      state: 'completed',
+      exitCode: 3,
+      bytes: 'top-secret-output\n'.length,
+    });
+    expect(lines[1]!.controller).toMatch(/^key:SHA256:/);
+    expect(lines[3]).toMatchObject({ controller: 'peer:mallory', code: 'UNAUTHORIZED' });
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 });

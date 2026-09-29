@@ -22,6 +22,8 @@ npm run format      # prettier --write
 | `src/envelope.ts` | `shell.v2`: hello, sealed and signed calls and answers, `ReplayGuard`                                |
 | `src/transfer.ts` | `ServerTransfers` (put/get state, temp file, commit, list, mkdir), `hashFile`, `destination`, `walk` |
 | `src/version.ts`  | `VERSION` and `DEAD_DROP_VERSION`, read from the package manifests                                   |
+| `src/limits.ts`   | `RateLimiter`: token bucket per controller for `shell.requestsPerMinute`                             |
+| `src/audit.ts`    | `AuditLog`: JSON lines per session, command, transfer and refusal; never command text or paths       |
 | `src/config.ts`   | `shell` config section, defaults, `loadConfig`                                                       |
 | `src/server.ts`   | `ShellServer`: embedded runtime, authorisation, sessions, ledger, idle sweep                         |
 | `src/client.ts`   | `ShellClient`, `RemoteSession`                                                                       |
@@ -37,7 +39,8 @@ npm run format      # prettier --write
 - Never overwrite a key file without `--force`, and never read a private key file other users can read.
 - Never rerun a job the ledger says is `running` or `unknown`. Unknown means unknown; do not report it as "not run".
 - Persist `running` before a command starts and `completed` before the answer is sent.
-- Never log or persist command text. Output may be persisted in the ledger only, never logged.
+- Never log or persist command text. Output may be persisted in the ledger only, never logged. The audit log follows the same rule and holds no paths either.
+- Check per-controller limits before anything runs or is written to the ledger: a refused request must have had no effect.
 - The client must not pass `idempotencyKey` to dead-drop. The mailbox would drop a deliberate re-ask of the same job; the ledger handles duplicates.
 - A command for a session that no longer exists is answered `session_lost` and not run.
 - Never change how `namedSessionId` derives an id from a name: clients of different versions must find the same session.

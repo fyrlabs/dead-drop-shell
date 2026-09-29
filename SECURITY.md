@@ -13,6 +13,8 @@ The machine running `ddshell serve` (the target you connect to, like the VM) exe
 ## What ddshell keeps and logs
 
 - The server log records job ids, caller identity (`key:` and the key fingerprint for v2), exit codes, durations and byte counts. It never records commands or output. For file transfers it records the transfer id, caller identity and size, never paths or contents.
+- The audit log (`shell.auditLog`, on by default, mode 600) records the same kind of facts, one JSON line per session opened or closed, command, transfer and refusal, with the key's comment beside its fingerprint. Same rule: no commands, output or paths. See [docs/configuration.md](docs/configuration.md#audit-log).
+- Each controller key is held to `shell.maxSessions` live sessions and `shell.requestsPerMinute` requests, so one runaway or stolen key cannot starve the others of sessions. It can still fill the eight handler slots with long commands; see [docs/per-person.md](docs/per-person.md) for full separation.
 - `put` can write, and `get` can read, any file or (with `-r`) directory tree the server's account can. That adds nothing an allowed controller could not already do with `cat`, but it is the same OS account boundary, so keep that account unprivileged.
 - The ledger keeps each finished command's output (not its text) for `ledgerRetentionMs`, default 24 hours, in files readable only by the account running the server.
 - Commands and output travel sealed to the recipient's key inside dead-drop's own encryption. Over GitHub, assume the ciphertext can stay in the repository's history (not verified against dead-drop's GitHub transport).

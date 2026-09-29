@@ -55,6 +55,12 @@ export interface ShellConfig {
   transferCapBytes: number;
   /** Server: largest piece of a file sent in one request. */
   transferChunkBytes: number;
+  /** Server: live sessions one controller may hold at once. */
+  maxSessions: number;
+  /** Server: requests one controller may send per minute, in bursts of up to as many. */
+  requestsPerMinute: number;
+  /** Server: JSON-lines audit file, or `false` for none. */
+  auditLog: string | false;
   /** Controller: short target names mapped to server peer ids. */
   targets: Record<string, string>;
 }
@@ -143,6 +149,15 @@ export function parseShellConfig(
   if (source.ledgerDir !== undefined && typeof source.ledgerDir !== 'string') {
     fail('shell.ledgerDir must be a path');
   }
+  if (
+    source.auditLog !== undefined &&
+    source.auditLog !== false &&
+    (typeof source.auditLog !== 'string' || source.auditLog === '')
+  ) {
+    fail('shell.auditLog must be a path or false');
+  }
+  const maxSessions = positive(source, 'maxSessions', 16);
+  if (!Number.isInteger(maxSessions)) fail('shell.maxSessions must be a whole number');
 
   const transferChunkBytes = positive(source, 'transferChunkBytes', 4 * MiB);
   if (!Number.isInteger(transferChunkBytes) || transferChunkBytes > MAX_TRANSFER_CHUNK_BYTES) {
@@ -175,6 +190,14 @@ export function parseShellConfig(
     ledgerRetentionMs: positive(source, 'ledgerRetentionMs', 24 * 60 * 60_000),
     transferCapBytes: positive(source, 'transferCapBytes', 64 * MiB),
     transferChunkBytes,
+    maxSessions,
+    requestsPerMinute: positive(source, 'requestsPerMinute', 600),
+    auditLog:
+      source.auditLog === false
+        ? false
+        : typeof source.auditLog === 'string'
+          ? resolvePath(source.auditLog, baseDir)
+          : join(runtime.dataDir, 'ddshell-audit.log'),
     targets: targets as Record<string, string>,
   };
 }

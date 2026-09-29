@@ -120,8 +120,18 @@ describe('config', () => {
       ledgerRetentionMs: 24 * 60 * 60_000,
       transferCapBytes: 64 * 1024 * 1024,
       transferChunkBytes: 4 * 1024 * 1024,
+      maxSessions: 16,
+      requestsPerMinute: 600,
+      auditLog: '/var/lib/ddshell/ddshell-audit.log',
       targets: {},
     });
+  });
+
+  it('turns the audit log off with false and resolves a relative path', () => {
+    expect(parseShellConfig({ auditLog: false }, runtime(), '/etc').auditLog).toBe(false);
+    expect(parseShellConfig({ auditLog: 'audit.log' }, runtime(), '/etc/ddshell').auditLog).toBe(
+      '/etc/ddshell/audit.log',
+    );
   });
 
   it.each([
@@ -139,6 +149,10 @@ describe('config', () => {
     [{ transferChunkBytes: 1.5 }, /transferChunkBytes/],
     [{ transferCapBytes: -1 }, /transferCapBytes/],
     [{ workspace: 'other' }, /configured workspace/],
+    [{ maxSessions: 1.5 }, /maxSessions/],
+    [{ requestsPerMinute: 0 }, /requestsPerMinute/],
+    [{ auditLog: true }, /auditLog/],
+    [{ auditLog: '' }, /auditLog/],
   ])('rejects %j', (shell, message) => {
     expect(() => parseShellConfig(shell, runtime(), '/etc')).toThrow(message);
   });

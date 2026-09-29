@@ -77,6 +77,12 @@ export async function check(path: string, debug = false): Promise<Finding[]> {
     const ledger = await writableAncestor(config.shell.ledgerDir);
     if (ledger.ok) add('ok', 'server', `ledger ${config.shell.ledgerDir} can be written`);
     else add('fail', 'server', `ledger ${config.shell.ledgerDir}: ${ledger.reason}`);
+    const { auditLog } = config.shell;
+    if (auditLog) {
+      const audit = await writableAncestor(dirname(auditLog));
+      if (audit.ok) add('ok', 'server', `audit log ${auditLog} can be written`);
+      else add('fail', 'server', `audit log ${auditLog}: ${audit.reason}`);
+    }
     const keys = authorizedKeys.map((line) => {
       const { fingerprint, comment } = parsePublicKey(line);
       return comment ? `${comment} (${fingerprint})` : fingerprint;

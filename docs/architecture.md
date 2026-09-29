@@ -27,9 +27,10 @@ A controller with a key (`shell.key`, made by `ddshell keygen`) speaks `shell.v2
 
 1. The client sends `{ v: 1, op: "exec", sessionId, jobId, command, open?, close? }`, sealed as above over v2 or as JSON to `shell.v1` with `workspace.call`. `open` is set on a session's first command; `close` makes a one-shot `exec` a single round trip.
 2. Over v2 the caller's identity is `key:<fingerprint>` of the key that signed. Over v1 the server checks `context.identity` against `shell.allowControllers`. It never looks at `context.from`, which is only the reply address.
-3. A job id already in flight waits for the first copy. A job id in the ledger is answered from it: `completed` returns the stored result with `replayed: true`, `unknown` returns `state: "unknown"`. A job id owned by another controller is refused.
-4. Otherwise the server finds the session keyed by (identity, sessionId), or opens one if `open` is set, or answers `session_lost`.
-5. `running` is written to the ledger, the command runs, and `completed` is written with the result before the answer goes back.
+3. The caller's request is taken from its `requestsPerMinute` bucket; an empty bucket is refused with `RATE_LIMITED` before anything else happens.
+4. A job id already in flight waits for the first copy. A job id in the ledger is answered from it: `completed` returns the stored result with `replayed: true`, `unknown` returns `state: "unknown"`. A job id owned by another controller is refused.
+5. Otherwise the server finds the session keyed by (identity, sessionId), or answers `session_lost`, or opens one if `open` is set and the caller holds fewer than `maxSessions`; past that it refuses with `RATE_LIMITED`.
+6. `running` is written to the ledger, the command runs, and `completed` is written with the result before the answer goes back. The audit log gets one line for the job, and one each when a session opens or closes; see [configuration.md](configuration.md#audit-log).
 
 A named session's id is derived from its name: sha256 of `ddshell-session\0<name>`, shaped as a version 8 UUID. Every client of one controller derives the same id, so `open` on a live session joins it and on a missing one starts it, with no extra round trip. `open` also carries `name`, which the server keeps beside the session for listing.
 

@@ -10,8 +10,10 @@
 - `ddshell put`, `ddshell get` and scp-style `ddshell cp vm:path local` copy files. Each copy is checked with sha256 and lands whole or not at all. Files up to 64 MiB by default, sent in pieces.
 - `-r` on `put`, `get` and `cp` copies whole directories, as `scp -r` does. Small files take one round trip each.
 - `examples/ddshell-server@.service` runs one server per person, each as their own account with their own repository and secret. See `docs/per-person.md`.
+- Each controller is held to 16 live sessions and 600 requests a minute by default (`shell.maxSessions`, `shell.requestsPerMinute`). A refused command is not run.
+- The server keeps an audit log, one JSON line per session, command, file transfer and refusal, with who, exit code, duration and size, never the command, its output or paths. Set `shell.auditLog` to move it or `false` to turn it off.
 - A slow command in one session no longer holds up the other sessions over git or GitHub. This needs dead-drop 0.16.1, which is now the minimum.
-- `ddshell check` tests a config before you rely on it: it parses, the secret file is private, the server's shell and ledger work, every transport answers, and each target is announcing itself.
+- `ddshell check` tests a config before you rely on it: it parses, the secret file is private, the server's shell, ledger and audit log work, every transport answers, and each target is announcing itself.
 - `ddshell ping <target>` checks a server is up and shows its versions, uptime and round trip. `--count` repeats it and prints min, median and max.
 - `ddshell exec a,b,c -- <command>` runs a command on several machines at once, prefixes each output line with its machine, and exits with the worst exit code.
 - The server example now uses the plain git transport, so the server machine needs only git and a token for the drop repository, not `gh`.

@@ -372,6 +372,7 @@ describe('ddshell cli', () => {
     expect(await main(['check', '--config', join(root, 'vm.json')], streams)).toBe(0);
     expect(streams.out()).toContain('ok    server: shell /bin/sh is executable\n');
     expect(streams.out()).toMatch(/ok {4}server: ledger .*ddshell-ledger can be written\n/);
+    expect(streams.out()).toMatch(/ok {4}server: audit log .*ddshell-audit\.log can be written\n/);
     expect(streams.out()).toMatch(/ok {4}server: authorises laptop \(\S+\)\n/);
     expect(streams.out()).toMatch(/ok {4}server: host key .*vm\.host_key: \S+\n/);
   });

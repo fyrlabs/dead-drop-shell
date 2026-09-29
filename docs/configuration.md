@@ -28,6 +28,9 @@ Never put a secret in the file. Reference it: `"secrets": ["${file:~/.deaddrop/d
 | `ledgerRetentionMs`  | server     | `86400000` (24 h)                       | How long finished job records, including their output, are kept for replay.                                                                                                                                             |
 | `transferCapBytes`   | server     | `67108864` (64 MiB)                     | Largest file `put`, `get` or `cp` moves, in either direction. Checked before anything is written.                                                                                                                       |
 | `transferChunkBytes` | server     | `4194304` (4 MiB)                       | Largest piece of a file per request, at most 16 MiB. The server announces it when a transfer opens, so clients follow it. Larger pieces mean fewer round trips over GitHub and bigger commits.                          |
+| `maxSessions`        | server     | `16`                                    | Live sessions one controller may hold at once. Past it, opening another is refused with `RATE_LIMITED` and the command is not run. See [Limits](#limits-per-controller).                                                |
+| `requestsPerMinute`  | server     | `600`                                   | Requests one controller may send per minute, in bursts of up to as many. Every request counts: commands, pings, every piece of a file.                                                                                  |
+| `auditLog`           | server     | `<dataDir>/ddshell-audit.log`           | JSON-lines audit file, mode 600, or `false` for none. Relative paths resolve against the config file. See [Audit log](#audit-log).                                                                                      |
 | `targets`            | controller | `{}`                                    | Short names to server peer ids, e.g. `{ "vm": "build-vm-01" }`. An unmapped target is used as a peer id.                                                                                                                |
 
 `${env:...}` and `${file:...}` references are expanded only in the dead-drop part of the file, not inside `shell`.
@@ -35,6 +38,18 @@ Never put a secret in the file. Reference it: `"secrets": ["${file:~/.deaddrop/d
 ## Values the server changes
 
 When the shell's workspace does not set `concurrency`, the server uses `8` instead of dead-drop's default of `1`. At `1`, one `sleep 60` would hold up every other session's commands. The limit is shared by every request to the server, not only commands: while eight commands are running, a ninth command, a `ping` and every chunk of a file transfer wait for one of them to finish. Raise `concurrency` on the server's workspace if people keep long commands running.
+
+## Limits per controller
+
+Each controller, by key, gets its own `maxSessions` and `requestsPerMinute`; one controller at its limit does not slow another. A refusal is `RATE_LIMITED` and is not retried automatically, since an immediate retry would be refused too: the message says which limit and, for the rate, how many seconds to wait. A refused command was not run.
+
+`requestsPerMinute` is a token bucket, so after a quiet minute a controller can send 600 requests at once. A 64 MiB `put` takes 18 requests, and `-r` takes one or more per file, so a recursive copy of more than a few hundred small files over a fast transport can hit the default. Over GitHub, where each round trip takes seconds, it cannot. Requests the server refuses before it knows the key (unknown key, bad signature, replay) are not counted against anyone, but they are in the audit log.
+
+## Audit log
+
+One JSON object per line, appended as things happen: `session-open`, `exec`, `session-close`, `put`, `get` and `refused`. Every line has `time` and `controller` (`key:SHA256:...`, or `peer:<id>` for a refusal before the key was trusted), plus `name`, the key's comment, when the key is authorised. `exec` lines carry `jobId`, `sessionId`, `state`, `exitCode`, `durationMs`, output `bytes`, `truncated`, `timedOut` and `replayed`; transfer lines carry `transferId` and `bytes`; `refused` lines carry `code` and `reason`.
+
+It never holds command text, output or file paths. The ledger keeps output for `ledgerRetentionMs`; the audit log keeps who did what and how it went, for as long as you keep the file. The server reopens the file for every line, so `logrotate` can rename it without `copytruncate`. Nothing trims it, and every refused request adds a line, so a workspace member hammering the server with bad requests grows it; rotate it.
 
 ## Choosing the 8 MiB cap
 
