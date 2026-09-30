@@ -77,6 +77,19 @@ export interface SessionsRequest {
   op: 'sessions';
 }
 
+/** Lists the caller's own jobs still in the server's ledger, newest first. Runs nothing. */
+export interface JobsRequest {
+  v: 1;
+  op: 'jobs';
+}
+
+/** One of the caller's jobs from the ledger, without its output. Runs nothing. */
+export interface JobRequest {
+  v: 1;
+  op: 'job';
+  jobId: string;
+}
+
 /**
  * Starts an upload. The server writes a temporary file beside `path` and only
  * renames it into place on `put-commit`, once size and sha256 match.
@@ -180,6 +193,8 @@ export type ShellRequest =
   | CloseRequest
   | PingRequest
   | SessionsRequest
+  | JobsRequest
+  | JobRequest
   | TransferRequest
   | MkdirRequest
   | ListRequest;
@@ -288,6 +303,34 @@ export interface SessionsResult {
   sessions: SessionInfo[];
 }
 
+/** A job as the ledger knows it. Never the command, and no output. */
+export interface JobInfo {
+  jobId: string;
+  sessionId: string;
+  /** `running` here means the server has not finished it; `unknown` means it stopped mid-run. */
+  state: 'running' | 'completed' | 'unknown';
+  /** Milliseconds since the epoch, by the server's clock. */
+  startedAt: number;
+  finishedAt?: number;
+  /** Null when it never started or its session was killed. Absent until finished. */
+  exitCode?: number | null;
+  durationMs?: number;
+  cancelled?: boolean;
+  truncated?: boolean;
+  timedOut?: boolean;
+}
+
+export interface JobsResult {
+  /** The server's clock now, so a client can show ages without trusting its own. */
+  now: number;
+  jobs: JobInfo[];
+}
+
+export interface JobStatus {
+  now: number;
+  job: JobInfo;
+}
+
 export interface TransferOpened {
   /** Absolute path on the server. */
   path: string;
@@ -381,6 +424,11 @@ export function parseRequest(raw: unknown): ShellRequest {
   if (source.v !== 1) bad(`unsupported shell protocol version ${String(source.v)}`);
   if (source.op === 'ping') return { v: 1, op: 'ping' };
   if (source.op === 'sessions') return { v: 1, op: 'sessions' };
+  if (source.op === 'jobs') return { v: 1, op: 'jobs' };
+  if (source.op === 'job') {
+    if (!isJobId(source.jobId)) bad('jobId must be a UUID');
+    return { v: 1, op: 'job', jobId: source.jobId };
+  }
   if (typeof source.op === 'string' && TRANSFER_OPS.has(source.op)) return parseTransfer(source);
   if (source.op === 'list') return { v: 1, op: 'list', path: path(source.path, 'path') };
   if (source.op === 'mkdir') return parseMkdir(source);

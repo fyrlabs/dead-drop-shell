@@ -36,6 +36,8 @@ A named session's id is derived from its name: sha256 of `ddshell-session\0<name
 
 `{ v: 1, op: "sessions" }` passes the same identity check and answers `{ home, sessions }`: for each of the caller's own live sessions, its id, name, shell pid, working directory, idle time and whether a command is queued or running. Other controllers' sessions are left out.
 
+`{ v: 1, op: "jobs" }` answers `{ now, jobs }` from the ledger: the caller's own jobs, newest first, each with its id, session id, state, start and finish times, exit code, duration and whether it was cancelled, timed out or truncated. `{ v: 1, op: "job", jobId }` answers `{ now, job }` for one of them: `NOT_FOUND` for an id the ledger does not hold (never run, or pruned after `ledgerRetentionMs`), `UNAUTHORIZED` for another controller's. `now` is the server's clock, so a client shows ages without trusting its own. Neither reads a session, runs anything, or returns command text or output, because the ledger stores no command text. `running` is what the ledger says: a job the server was running when it stopped reads `unknown` after the restart, never `running`. An older server refuses both with `BAD_REQUEST`, which the client reports as unsupported.
+
 `{ v: 1, op: "ping" }` passes the same identity check, then answers `{ version, deadDropVersion, uptimeMs }` without touching sessions or the ledger. A 0.1.0 server refuses it with `BAD_REQUEST`, which the client reports as an older server that is up.
 
 ## File transfer

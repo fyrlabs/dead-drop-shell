@@ -40,7 +40,7 @@ export class JobLedger<Result> {
       if (name.endsWith('.tmp')) await rm(join(this.directory, name), { force: true });
     }
     const recovered: string[] = [];
-    for (const record of await this.all()) {
+    for (const record of await this.list()) {
       if (record.state !== 'running') continue;
       await this.put({ ...record, state: 'unknown', finishedAt: this.now() });
       recovered.push(record.jobId);
@@ -78,7 +78,7 @@ export class JobLedger<Result> {
   async prune(): Promise<number> {
     const cutoff = this.now() - this.retentionMs;
     let removed = 0;
-    for (const record of await this.all()) {
+    for (const record of await this.list()) {
       if (record.state === 'running') continue;
       if ((record.finishedAt ?? record.startedAt) > cutoff) continue;
       await rm(this.path(record.jobId), { force: true });
@@ -87,7 +87,8 @@ export class JobLedger<Result> {
     return removed;
   }
 
-  private async all(): Promise<Array<JobRecord<Result>>> {
+  /** Every record, in no particular order. */
+  async list(): Promise<Array<JobRecord<Result>>> {
     const records: Array<JobRecord<Result>> = [];
     // Leaves .tmp files alone: once open, one may be a write in progress.
     for (const name of await readdir(this.directory)) {

@@ -20,6 +20,10 @@ import {
   type ExecRequest,
   type ExecResponse,
   type JobOutput,
+  type JobRequest,
+  type JobsRequest,
+  type JobsResult,
+  type JobStatus,
   type OutputRequest,
   type PingRequest,
   type PingResult,
@@ -260,8 +264,40 @@ export class ShellClient {
     options: { timeoutMs?: number; signal?: AbortSignal } = {},
   ): Promise<SessionsResult> {
     const request: SessionsRequest = { v: 1, op: 'sessions' };
+    return await this.callNewer<SessionsResult>(peer, request, 'session listing', options);
+  }
+
+  /** The caller's jobs in the ledger on `peer`, newest first. */
+  async jobs(
+    peer: string,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<JobsResult> {
+    const request: JobsRequest = { v: 1, op: 'jobs' };
+    return await this.callNewer<JobsResult>(peer, request, 'job listing', options);
+  }
+
+  /** One of the caller's jobs on `peer`. NOT_FOUND once the ledger has dropped it. */
+  async job(
+    peer: string,
+    jobId: string,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<JobStatus> {
+    const request: JobRequest = { v: 1, op: 'job', jobId };
+    return await this.callNewer<JobStatus>(peer, request, 'job status', options);
+  }
+
+  /**
+   * An older server refuses an operation it lacks with BAD_REQUEST, before it
+   * reads `op` ("sessionId must be a UUID") or after ("unknown shell operation").
+   */
+  private async callNewer<Result>(
+    peer: string,
+    request: ShellRequest,
+    feature: string,
+    options: { timeoutMs?: number; signal?: AbortSignal },
+  ): Promise<Result> {
     try {
-      return await this.call<SessionsResult>(peer, request, options);
+      return await this.call<Result>(peer, request, options);
     } catch (error) {
       if (
         DeadDropError.is(error) &&
@@ -270,7 +306,7 @@ export class ShellClient {
       ) {
         throw new DeadDropError(
           'UNSUPPORTED',
-          `${peer} runs a ddshell without session listing; upgrade it to list sessions`,
+          `${peer} runs a ddshell without ${feature}; upgrade it to use this`,
         );
       }
       throw error;

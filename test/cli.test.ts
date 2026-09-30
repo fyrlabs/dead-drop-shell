@@ -436,6 +436,41 @@ describe('ddshell cli', () => {
     expect(streams.out()).toBe(`/\n${home}\n`);
   });
 
+  it('jobs lists the ledger and status finds a job by prefix', async () => {
+    const run = async (...args: string[]) => {
+      const streams = io();
+      const code = await main(['--config', controllerConfig, ...args], streams);
+      return { code, out: streams.out(), err: streams.err() };
+    };
+    expect(await run('exec', 'vm', '--', 'true')).toMatchObject({ code: 0 });
+    expect(await run('exec', 'vm', '--', 'sh -c "exit 4"')).toMatchObject({ code: 4 });
+
+    const listed = await run('jobs', 'vm');
+    expect(listed.code).toBe(0);
+    const [header, newest, older, extra] = listed.out.trimEnd().split('\n');
+    expect(header).toMatch(/^ID +STATE +EXIT +SESSION +STARTED +DURATION$/);
+    expect(newest).toMatch(/^[0-9a-f]{8} +completed +4 +[0-9a-f]{8} +\d+s ago +\d+s$/);
+    expect(older).toMatch(/^[0-9a-f]{8} +completed +0 /);
+    expect(extra).toBeUndefined();
+
+    const prefix = newest!.slice(0, 8);
+    const shown = await run('status', 'vm', prefix);
+    expect(shown.code).toBe(0);
+    expect(shown.out).toMatch(
+      new RegExp(
+        `^job +${prefix}[0-9a-f-]{28}\nstate +completed\nexit +4\nsession +[0-9a-f-]{36}\n` +
+          'started +\\d{4}-\\d\\d-\\d\\dT[\\d:.]+Z \\(\\d+s ago\\)\nduration +\\d+s\n$',
+      ),
+    );
+
+    const missing = await run('status', 'vm', 'ffff');
+    expect(missing).toMatchObject({ code: 1, out: '' });
+    expect(missing.err).toMatch(/no job "ffff" on vm/);
+    expect(await run('status', 'vm', 'zzzz')).toMatchObject({ code: 255 });
+    expect(await run('status', 'vm')).toMatchObject({ code: 255 });
+    expect(await run('status', 'vm,other', prefix)).toMatchObject({ code: 255 });
+  });
+
   it('--session keeps a named session between exec, interactive use and sessions', async () => {
     const run = async (...args: string[]) => {
       const streams = io();

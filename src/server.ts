@@ -15,7 +15,7 @@ import { AuditLog, type AuditEvent } from './audit.js';
 import type { ShellConfig } from './config.js';
 import { answerHello, openRequest, ReplayGuard, sealAnswer } from './envelope.js';
 import { ensureKeyPair, parsePublicKey, type KeyPair, type PublicKey } from './keys.js';
-import { JobLedger } from './ledger.js';
+import { JobLedger, type JobRecord } from './ledger.js';
 import { RateLimiter } from './limits.js';
 import { OutputBuffer, readStored } from './output.js';
 import {
@@ -27,8 +27,11 @@ import {
   type CloseResult,
   type ExecRequest,
   type ExecResponse,
+  type JobInfo,
   type JobOutput,
   type JobResult,
+  type JobsResult,
+  type JobStatus,
   type OutputRequest,
   type PingResult,
   type SessionLost,
@@ -321,6 +324,8 @@ export class ShellServer {
       };
     }
     if (request.op === 'sessions') return this.list(identity);
+    if (request.op === 'jobs') return this.jobs(identity);
+    if (request.op === 'job') return this.job(identity, request.jobId);
     if (request.op === 'output') return this.output(identity, request);
     if (request.op === 'cancel') return this.cancel(identity, request.jobId);
     if (request.op === 'list') return this.transfers.list(request.path);
@@ -633,6 +638,20 @@ export class ShellServer {
     return { home: this.home, sessions };
   }
 
+  /** Only the caller's own jobs. The ledger holds no command text, so there is none to show. */
+  private async jobs(identity: string): Promise<JobsResult> {
+    const records = (await this.ledger.list()).filter((record) => record.identity === identity);
+    records.sort((a, b) => b.startedAt - a.startedAt);
+    return { now: Date.now(), jobs: records.map(jobInfo) };
+  }
+
+  private async job(identity: string, jobId: string): Promise<JobStatus> {
+    const record = await this.ledger.get(jobId);
+    if (!record) throw new DeadDropError('NOT_FOUND', `no job ${jobId} on server`);
+    if (record.identity !== identity) throw foreignJob(jobId);
+    return { now: Date.now(), job: jobInfo(record) };
+  }
+
   private live(identity: string): Entry[] {
     return [...this.sessions.values()].filter(
       (entry) => entry.identity === identity && !entry.session.closed,
@@ -709,6 +728,8 @@ type Answer =
   | CloseResult
   | PingResult
   | SessionsResult
+  | JobsResult
+  | JobStatus
   | TransferResponse;
 
 interface Stream {
@@ -751,6 +772,25 @@ interface Entry {
 
 function sessionKey(identity: string, sessionId: string): string {
   return `${identity}\0${sessionId}`;
+}
+
+function jobInfo({ result, ...record }: JobRecord<JobResult>): JobInfo {
+  return {
+    jobId: record.jobId,
+    sessionId: record.sessionId,
+    state: record.state,
+    startedAt: record.startedAt,
+    ...(record.finishedAt === undefined ? {} : { finishedAt: record.finishedAt }),
+    ...(result === undefined
+      ? {}
+      : {
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          truncated: result.truncated,
+          timedOut: result.timedOut,
+          ...(result.cancelled ? { cancelled: true } : {}),
+        }),
+  };
 }
 
 function foreignJob(jobId: string): DeadDropError {

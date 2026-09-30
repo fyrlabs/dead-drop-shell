@@ -573,3 +573,92 @@ describe('per-controller limits and the audit log', () => {
     expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 });
+
+describe('job listing', () => {
+  it('lists only the caller’s jobs, newest first, and shows a running one', async () => {
+    await startServer({ allowControllers: ['laptop', 'ops'] });
+    const client = await startClient();
+    const session = client.session('vm');
+    const failed = randomUUID();
+    const worked = randomUUID();
+    await run(session, 'exit_code() { return "$1"; }; exit_code 3', failed);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await run(session, 'echo secret-output', worked);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const slow = randomUUID();
+    let up = false;
+    const running = session.run('echo up; sleep 30', {
+      jobId: slow,
+      onOutput: () => (up = true),
+    });
+    await waitFor(() => up, 5000);
+
+    const { now, jobs } = await client.jobs('vm', { timeoutMs: 10_000 });
+    expect(jobs.map((job) => job.jobId)).toEqual([slow, worked, failed]);
+    expect(jobs[0]).toMatchObject({ state: 'running', sessionId: session.id });
+    expect(jobs[0]).not.toHaveProperty('exitCode');
+    expect(jobs[1]).toMatchObject({ state: 'completed', exitCode: 0 });
+    expect(jobs[2]).toMatchObject({ state: 'completed', exitCode: 3 });
+    expect(jobs[2]!.startedAt).toBeLessThanOrEqual(now);
+    // No command text and no output, in any field.
+    expect(JSON.stringify(jobs)).not.toMatch(/secret-output|exit_code|sleep/);
+
+    const ops = await startClient('ops');
+    expect((await ops.jobs('vm', { timeoutMs: 10_000 })).jobs).toEqual([]);
+    await session.cancel(slow);
+    await running;
+  });
+
+  it('shows one job, refuses another controller’s and reports a missing one', async () => {
+    await startServer({ allowControllers: ['laptop', 'ops'] });
+    const client = await startClient();
+    const jobId = randomUUID();
+    await run(client.session('vm'), 'true', jobId);
+
+    const { job } = await client.job('vm', jobId, { timeoutMs: 10_000 });
+    expect(job).toMatchObject({ jobId, state: 'completed', exitCode: 0, truncated: false });
+    const ops = await startClient('ops');
+    await expect(ops.job('vm', jobId, { timeoutMs: 10_000 })).rejects.toMatchObject({
+      code: 'UNAUTHORIZED',
+    });
+    await expect(client.job('vm', randomUUID(), { timeoutMs: 10_000 })).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+    });
+  });
+
+  it('reports a job left running by a stopped server as unknown', async () => {
+    const jobId = randomUUID();
+    const ledger = new JobLedger<JobResult>(join(root, 'vm-state', 'ddshell-ledger'), 60_000);
+    await ledger.open();
+    const [line] = await keyLines(root, ['laptop']);
+    await ledger.put({
+      jobId,
+      identity: `key:${parsePublicKey(line!).fingerprint}`,
+      sessionId: randomUUID(),
+      state: 'running',
+      startedAt: Date.now() - 5000,
+    });
+    await startServer();
+    const { job } = await (await startClient()).job('vm', jobId, { timeoutMs: 10_000 });
+    expect(job.state).toBe('unknown');
+    expect(job.finishedAt).toBeGreaterThan(job.startedAt);
+  });
+
+  it('reports a server without job listing as unsupported', async () => {
+    const old = new DeadDropRuntime({ config: runtimeConfig('old') });
+    await old.start();
+    cleanup.push(() => old.stop());
+    old.defaultWorkspace().service('shell', {
+      v1: () => {
+        throw new DeadDropError('BAD_REQUEST', 'sessionId must be a UUID');
+      },
+    });
+    const client = await startClient('laptop', { v1: true });
+    await expect(client.jobs('old', { timeoutMs: 10_000 })).rejects.toMatchObject({
+      code: 'UNSUPPORTED',
+    });
+    await expect(client.job('old', randomUUID(), { timeoutMs: 10_000 })).rejects.toMatchObject({
+      code: 'UNSUPPORTED',
+    });
+  });
+});

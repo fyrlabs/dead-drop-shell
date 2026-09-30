@@ -21,7 +21,13 @@ import {
 } from './client.js';
 import { DEFAULT_CONFIG_PATH, loadConfig } from './config.js';
 import { ensureKeyPair, formatPublicKey, generateKeyPair, writeKeyPair } from './keys.js';
-import { isSessionName, type ExecResponse, type TransferOpened } from './protocol.js';
+import {
+  isJobId,
+  isSessionName,
+  type ExecResponse,
+  type JobInfo,
+  type TransferOpened,
+} from './protocol.js';
 import { systemdUnit } from './unit.js';
 import { VERSION } from './version.js';
 
@@ -34,6 +40,8 @@ Usage:
   ddshell <target> [--session <name>] [--config <file>] [--timeout <ms>] [--debug]
   ddshell exec <target>[,<target>...] [--session <name>] [--config <file>] [--timeout <ms>] [--debug] -- <command...>
   ddshell sessions <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug]
+  ddshell jobs <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug]
+  ddshell status <target> <job> [--config <file>] [--timeout <ms>] [--debug]
   ddshell ping <target>[,<target>...] [--config <file>] [--timeout <ms>] [--count <n>]
   ddshell put [-r] <target>[,<target>...] <local-file> <remote-path> [--config <file>] [--timeout <ms>] [--debug]
   ddshell get [-r] <target> <remote-file> <local-path> [--config <file>] [--timeout <ms>] [--debug]
@@ -49,7 +57,9 @@ outcome after a server restart; 255 ddshell itself failed. With several targets,
 each output line is prefixed with its target and the exit code is the highest.
 --session joins the live session of that name, or starts it, and leaves it
 running on exit; it closes on \`exit\` or after the server's idle timeout.
-Exit codes (ping, sessions): 0 every request answered; 1 some did not; 255 ddshell failed.
+jobs lists your jobs in the server's ledger, newest first, and status shows one by
+its id or a unique prefix of it. Neither shows commands or output.
+Exit codes (ping, sessions, jobs, status): 0 every request answered; 1 some did not; 255 ddshell failed.
 Exit codes (put, get, cp): 0 every copy landed and matched its sha256; 1 some did
 not; 255 ddshell failed. Remote relative paths start in the target's home, as in scp.
 -r copies directories, following symbolic links; a file that fails or is skipped
@@ -223,6 +233,20 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       if (rest.length > 0) throw usage(`unexpected argument "${rest[0]}"`);
       return await sessions(io, config, targets(target), { timeoutMs, debug: values.debug });
     }
+    if (command === 'jobs') {
+      if (target === undefined) throw usage('jobs needs a target');
+      if (rest.length > 0) throw usage(`unexpected argument "${rest[0]}"`);
+      return await jobs(io, config, targets(target), { timeoutMs, debug: values.debug });
+    }
+    if (command === 'status') {
+      const [job, extra] = rest;
+      if (target === undefined || job === undefined) throw usage('status needs a target and a job');
+      if (extra !== undefined) throw usage(`unexpected argument "${extra}"`);
+      return await status(io, config, single(target, 'status'), job, {
+        timeoutMs,
+        debug: values.debug,
+      });
+    }
     if (command === 'ping') {
       if (target === undefined) throw usage('ping needs a target');
       if (rest.length > 0) throw usage(`unexpected argument "${rest[0]}"`);
@@ -276,6 +300,8 @@ const COMMANDS = new Set([
   'unit',
   'exec',
   'sessions',
+  'jobs',
+  'status',
   'ping',
   'put',
   'get',
@@ -289,10 +315,15 @@ function targets(list: string): string[] {
   return [...new Set(names)];
 }
 
-function single(target: string): string {
+function single(target: string, command = 'get'): string {
   const [first, ...others] = targets(target);
-  if (others.length > 0)
-    throw usage('get takes one target: several would write the same local file');
+  if (others.length > 0) {
+    throw usage(
+      command === 'get'
+        ? 'get takes one target: several would write the same local file'
+        : `${command} takes one target: job ids are per server`,
+    );
+  }
   return first!;
 }
 
@@ -567,17 +598,127 @@ async function sessions(
         entry.busy ? 'busy' : `idle ${duration(entry.idleMs)}`,
         display(entry.cwd, listed.home),
       ]);
-      const table = [['NAME', 'ID', 'PID', 'STATE', 'CWD'], ...rows];
-      const widths = table[0]!.map((_, column) =>
-        Math.max(...table.map((row) => row[column]!.length)),
-      );
-      for (const row of table) {
-        out.stdout.write(
-          `${row.map((cell, column) => (column === row.length - 1 ? cell : cell.padEnd(widths[column]!))).join('  ')}\n`,
-        );
-      }
+      table(out, [['NAME', 'ID', 'PID', 'STATE', 'CWD'], ...rows]);
       return 0;
     });
+  } finally {
+    await client.stop();
+  }
+}
+
+/** Left-aligned columns, two spaces apart, the last one unpadded. */
+function table(out: Io, rows: string[][]): void {
+  const widths = rows[0]!.map((_, column) => Math.max(...rows.map((row) => row[column]!.length)));
+  for (const row of rows) {
+    out.stdout.write(
+      `${row.map((cell, column) => (column === row.length - 1 ? cell : cell.padEnd(widths[column]!))).join('  ')}\n`,
+    );
+  }
+}
+
+function jobState(job: JobInfo): string {
+  if (job.cancelled) return 'cancelled';
+  if (job.timedOut) return 'timed out';
+  return job.state;
+}
+
+async function jobs(
+  io: Io,
+  config: Loaded,
+  targets: string[],
+  options: { timeoutMs: number; debug: boolean },
+): Promise<number> {
+  const client = await ShellClient.start({
+    ...config,
+    debug: options.debug,
+    onNewHost: pinned(io),
+  });
+  try {
+    return await fanOut(io, targets, async (out, target) => {
+      let listed;
+      try {
+        listed = await client.jobs(resolveTarget(config.shell, target), options);
+      } catch (error) {
+        out.stderr.write(`[ddshell] ${describe(error)}\n`);
+        return 1;
+      }
+      table(out, [
+        ['ID', 'STATE', 'EXIT', 'SESSION', 'STARTED', 'DURATION'],
+        ...listed.jobs.map((job) => [
+          job.jobId.slice(0, 8),
+          jobState(job),
+          job.exitCode === undefined || job.exitCode === null ? '-' : String(job.exitCode),
+          job.sessionId.slice(0, 8),
+          `${duration(listed.now - job.startedAt)} ago`,
+          job.durationMs === undefined ? '-' : duration(job.durationMs),
+        ]),
+      ]);
+      return 0;
+    });
+  } finally {
+    await client.stop();
+  }
+}
+
+async function status(
+  io: Io,
+  config: Loaded,
+  target: string,
+  job: string,
+  options: { timeoutMs: number; debug: boolean },
+): Promise<number> {
+  // A prefix, as `ddshell jobs` prints them. Ids are UUIDs, so at least 4 characters.
+  const wanted = job.toLowerCase();
+  if (!isJobId(wanted) && !/^[0-9a-f-]{4,}$/.test(wanted)) {
+    throw usage(`"${job}" is not a job id or the start of one`);
+  }
+  const client = await ShellClient.start({
+    ...config,
+    debug: options.debug,
+    onNewHost: pinned(io),
+  });
+  try {
+    const peer = resolveTarget(config.shell, target);
+    let jobId = wanted;
+    if (!isJobId(jobId)) {
+      const matches = (await client.jobs(peer, options)).jobs.filter((entry) =>
+        entry.jobId.startsWith(wanted),
+      );
+      if (matches.length === 0)
+        throw new DeadDropError('NOT_FOUND', `no job "${job}" on ${target}`);
+      if (matches.length > 1) {
+        throw new DeadDropError(
+          'BAD_REQUEST',
+          `"${job}" matches ${matches.length} jobs on ${target}; use more of the id`,
+        );
+      }
+      jobId = matches[0]!.jobId;
+    }
+    const { now, job: info } = await client.job(peer, jobId, options);
+    const notes = [
+      info.cancelled && 'cancelled',
+      info.timedOut && 'timed out',
+      info.truncated && 'output truncated',
+    ].filter(Boolean);
+    const lines = [
+      ['job', info.jobId],
+      ['state', info.state],
+      ['exit', info.exitCode === undefined || info.exitCode === null ? '-' : String(info.exitCode)],
+      ['session', info.sessionId],
+      [
+        'started',
+        `${new Date(info.startedAt).toISOString()} (${duration(now - info.startedAt)} ago)`,
+      ],
+      ['duration', info.durationMs === undefined ? '-' : duration(info.durationMs)],
+      ...(notes.length > 0 ? [['notes', notes.join(', ')]] : []),
+    ];
+    for (const [key, value] of lines) io.stdout.write(`${key!.padEnd(8)}  ${value}\n`);
+    return 0;
+  } catch (error) {
+    // Like sessions: the target's answer is exit 1, anything of ddshell's own is 255.
+    if (!DeadDropError.is(error)) throw error;
+    io.stderr.write(`[ddshell] ${describe(error)}\n`);
+    return 1;
   } finally {
     await client.stop();
   }

@@ -79,4 +79,17 @@ describe('JobLedger', () => {
     expect(await ledger.get('../../etc/passwd')).toBeUndefined();
     await expect(ledger.put(record({ jobId: '../x' }))).rejects.toThrow(/invalid job id/);
   });
+
+  it('lists every record but not a write in progress', async () => {
+    const ledger = new JobLedger<string>(directory, 60_000);
+    await ledger.open();
+    const first = record();
+    const second = record({ identity: 'ops', state: 'completed', finishedAt: 1500 });
+    await ledger.put(first);
+    await ledger.put(second);
+    await writeFile(join(directory, `${randomUUID()}.json.tmp`), '{"half');
+    const listed = await ledger.list();
+    expect(listed).toHaveLength(2);
+    expect(listed).toEqual(expect.arrayContaining([first, second]));
+  });
 });
