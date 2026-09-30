@@ -29,6 +29,34 @@ export interface ExecRequest {
   close?: boolean;
   /** The session's name, recorded when `open` starts it, so `sessions` can show it. */
   name?: string;
+  /**
+   * Answer with a `JobOutput` as soon as the job runs and has output, instead
+   * of holding the request until it finishes. An older server ignores this and
+   * answers the `JobResult` as before.
+   */
+  stream?: boolean;
+  /** How long a `stream` answer may wait for output or the end. The server caps it. */
+  waitMs?: number;
+}
+
+/** A streamed job's output from `offset`, waiting up to `waitMs` for some. Runs nothing. */
+export interface OutputRequest {
+  v: 1;
+  op: 'output';
+  jobId: string;
+  offset: number;
+  waitMs?: number;
+}
+
+/**
+ * Interrupts a running job: SIGINT to everything the command started. One
+ * that ignores it is stopped with its session after a grace period. A job
+ * still queued behind another in its session is not run.
+ */
+export interface CancelRequest {
+  v: 1;
+  op: 'cancel';
+  jobId: string;
 }
 
 export interface CloseRequest {
@@ -147,6 +175,8 @@ export type TransferRequest =
 
 export type ShellRequest =
   | ExecRequest
+  | OutputRequest
+  | CancelRequest
   | CloseRequest
   | PingRequest
   | SessionsRequest
@@ -175,6 +205,45 @@ export interface JobResult {
   sessionClosed: boolean;
   /** Answered from the ledger rather than executed by this request. */
   replayed: boolean;
+  /** A `cancel` reached it. `exitCode` is null if it never started or its session was killed. */
+  cancelled?: boolean;
+  /** Ledger only: a streamed job's output. Its `stdout` and `stderr` are empty. */
+  output?: StoredOutput;
+}
+
+/** One piece of output. Base64. */
+export interface OutputFrame {
+  fd: 1 | 2;
+  data: string;
+}
+
+export interface StoredOutput {
+  /** Where the first kept byte sits in the job's combined output. */
+  start: number;
+  frames: OutputFrame[];
+}
+
+/**
+ * Part of a streamed job's output. Offsets count stdout and stderr bytes
+ * together, in the order the server read them.
+ */
+export interface JobOutput {
+  jobId: string;
+  state: 'running' | 'completed' | 'unknown';
+  /** Where `frames` start. Larger than the offset asked for when older bytes were dropped. */
+  offset: number;
+  frames: OutputFrame[];
+  /** Ask from here next. */
+  next: number;
+  /** Bytes produced so far. */
+  end: number;
+  /** Once the job is over and `next` reaches `end`. Its `stdout` and `stderr` are empty. */
+  result?: JobResult;
+}
+
+export interface CancelResult {
+  /** False when the job is not running here: already finished, or never seen. */
+  cancelled: boolean;
 }
 
 /**
@@ -315,6 +384,17 @@ export function parseRequest(raw: unknown): ShellRequest {
   if (typeof source.op === 'string' && TRANSFER_OPS.has(source.op)) return parseTransfer(source);
   if (source.op === 'list') return { v: 1, op: 'list', path: path(source.path, 'path') };
   if (source.op === 'mkdir') return parseMkdir(source);
+  if (source.op === 'output' || source.op === 'cancel') {
+    if (!isJobId(source.jobId)) bad('jobId must be a UUID');
+    if (source.op === 'cancel') return { v: 1, op: 'cancel', jobId: source.jobId };
+    return {
+      v: 1,
+      op: 'output',
+      jobId: source.jobId,
+      offset: count(source.offset, 'offset'),
+      ...(source.waitMs === undefined ? {} : { waitMs: count(source.waitMs, 'waitMs') }),
+    };
+  }
   if (!isJobId(source.sessionId)) bad('sessionId must be a UUID');
 
   if (source.op === 'close') return { v: 1, op: 'close', sessionId: source.sessionId };
@@ -334,6 +414,8 @@ export function parseRequest(raw: unknown): ShellRequest {
     ...(source.open === true ? { open: true } : {}),
     ...(source.close === true ? { close: true } : {}),
     ...(source.name === undefined ? {} : { name: source.name }),
+    ...(source.stream === true ? { stream: true } : {}),
+    ...(source.waitMs === undefined ? {} : { waitMs: count(source.waitMs, 'waitMs') }),
   };
 }
 

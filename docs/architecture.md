@@ -58,12 +58,16 @@ The client keeps four pieces in flight and retries retryable errors (timeouts, t
 
 ## Sessions
 
-A session is one long-lived shell started in the home directory of the account running the server, in its own process group. Each command is written to its stdin as:
+A session is one long-lived shell started in the home directory of the account running the server, in its own process group. On start it defines `__ddshell_run() { __ddshell_in=1; eval "$__ddshell_cmd" </dev/null; __ddshell_status=$?; __ddshell_in=; return $__ddshell_status; }`. Each command is written to its stdin as:
 
 ```sh
 __ddshell_cmd='<command, single-quoted>'
-eval "$__ddshell_cmd" </dev/null
+trap '__ddshell_int=1; [ -n "$__ddshell_in" ] && return 130' INT
+__ddshell_int=
+__ddshell_run
 __ddshell_status=$?
+__ddshell_in=
+[ -n "$__ddshell_int" ] && __ddshell_status=130
 printf '\n%s:%s:%s:%s\n' <nonce> "$__ddshell_status" "$PWD" <nonce>
 printf '\n%s:end:%s\n' <nonce> <nonce> >&2
 ```
@@ -73,6 +77,12 @@ printf '\n%s:end:%s\n' <nonce> <nonce> >&2
 - The nonce is 16 random bytes per command, so output that imitates a trailer cannot end a command early.
 - `</dev/null` stops a command from reading the control stream.
 - A syntax error inside `eval` makes a POSIX non-interactive shell exit, so each command is first checked with `<shell> -n -c`.
+- Cancel sends SIGINT to the session's process group. Children get the default action and die; the shell runs the trap, whose `return` leaves `__ddshell_run`, so the rest of the command line is dropped as Ctrl-C drops it at a terminal, and the exit status is 130. A command still running `cancelGraceMs` (5 s) later, because it ignores SIGINT, is stopped by killing the session. Checked under `sh`, `bash` and `dash`.
+- Because commands run inside a function, bash's `declare` and `typeset` without `-g` make function-local variables that are gone after the command. Plain assignments, `export`, `cd`, functions and aliases persist as before.
+
+## Streaming
+
+`exec` with `stream: true` starts the job and answers as soon as `running` is persisted and some output exists (lingering 100 ms, so a quick command still takes one answer), the job ends, or `waitMs` passes (server cap 10 s; the client asks for 5 s). The client then long-polls `output` from the byte offset it has, and each answer holds a handler slot for at most that wait, so a long command no longer holds one for its whole run. Offsets count stdout and stderr together, in the order the server read them. The server keeps the latest `outputCapBytes` of a running job; a client that falls further behind is told how many bytes it missed. Once the job ends, its output and result are in the ledger, and `output` answers from there. `--timeout` bounds each request, not the command. `cancel` interrupts a job by id; a job still queued behind another in its session is not run. A server without streaming ignores `stream` and answers the whole result, so new clients work with old servers.
 
 Output is split from the trailer by a scanner that holds back just enough bytes to catch a trailer straddling two chunks, and keeps at most `outputCapBytes` across stdout and stderr.
 
@@ -86,4 +96,4 @@ The ledger stores command output for the retention window. That is the price of 
 
 ## What is deliberately missing
 
-No streaming, cancellation, PTY, or reconnecting to a session after a server restart. These are phase four in the parent project's [application extension proposal](https://github.com/fyrlabs/dead-drop/blob/main/docs/proposals/0001-application-extensions.md). There is also no generic plugin host here; [upstream-requirements.md](upstream-requirements.md) records what one would need.
+No PTY, or reconnecting to a session after a server restart. These are phase four in the parent project's [application extension proposal](https://github.com/fyrlabs/dead-drop/blob/main/docs/proposals/0001-application-extensions.md). There is also no generic plugin host here; [upstream-requirements.md](upstream-requirements.md) records what one would need.

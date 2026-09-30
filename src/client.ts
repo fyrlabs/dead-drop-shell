@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { open, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join, posix, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { DeadDropError, decodeJson, isErrorPayload } from '@fyrlabs/dead-drop/protocol';
 import { DeadDropRuntime, type RuntimeConfig, type Workspace } from '@fyrlabs/dead-drop/runtime';
@@ -12,10 +13,14 @@ import { KnownHosts, readKeyPair, type KeyPair, type PublicKey } from './keys.js
 import {
   SHELL_CHANNEL,
   SHELL_CHANNEL_V2,
+  type CancelRequest,
+  type CancelResult,
   type CloseRequest,
   type CloseResult,
   type ExecRequest,
   type ExecResponse,
+  type JobOutput,
+  type OutputRequest,
   type PingRequest,
   type PingResult,
   type SessionsRequest,
@@ -60,6 +65,26 @@ export type ShellCall = <Result>(
  * command itself. The workspace default of 30s is tuned for RPC, not builds.
  */
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+
+/** How long one streamed answer may wait on the server for output. */
+const POLL_WAIT_MS = 5000;
+
+/** After output arrives, how long to let more gather before asking again. */
+const POLL_GAP_MS = 250;
+
+/** Failed `output` polls in a row before giving up. Polls only read, so retrying is safe. */
+const POLL_ATTEMPTS = 10;
+
+export interface RunOptions {
+  /** Per request, not for the whole command. */
+  timeoutMs?: number;
+  jobId?: string;
+  close?: boolean;
+  signal?: AbortSignal;
+  onOutput: (fd: 1 | 2, bytes: Buffer) => void;
+  /** This many bytes were dropped on the server before they could be fetched. */
+  onDropped?: (bytes: number) => void;
+}
 
 /** Chunk requests kept in flight at once, so a slow transport's latency overlaps. */
 const TRANSFER_WINDOW = 4;
@@ -523,22 +548,92 @@ export class RemoteSession {
    * again for the same job: the server answers from its ledger instead of
    * running the command twice.
    */
-  async exec(
+  exec(
     command: string,
     options: { timeoutMs?: number; jobId?: string; close?: boolean; signal?: AbortSignal } = {},
   ): Promise<ExecResponse> {
+    return this.send<ExecResponse>(command, options.jobId ?? randomUUID(), options);
+  }
+
+  /**
+   * Runs one command and hands its output to `onOutput` as it arrives. The
+   * server answers once the job runs and `output` polls fetch the rest, so
+   * `timeoutMs` bounds each round trip, not the command. Resolves to the
+   * result, with empty `stdout` and `stderr`. A server without streaming
+   * answers the whole result at once instead, output included.
+   */
+  async run(command: string, options: RunOptions): Promise<ExecResponse> {
+    const jobId = options.jobId ?? randomUUID();
+    const timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    const waitMs = Math.min(POLL_WAIT_MS, Math.floor(timeoutMs / 2));
+    let answer = await this.send<ExecResponse | JobOutput>(command, jobId, options, waitMs);
+    let offset = 0;
+    let failures = 0;
+    for (;;) {
+      if (!('frames' in answer)) return answer;
+      if (answer.offset > offset) options.onDropped?.(answer.offset - offset);
+      for (const { fd, data } of answer.frames) options.onOutput(fd, Buffer.from(data, 'base64'));
+      offset = answer.next;
+      if (answer.result && offset >= answer.end) return answer.result;
+      // While output flows, let some gather rather than asking for every line.
+      if (answer.frames.length > 0 && offset >= answer.end) await sleep(POLL_GAP_MS);
+      const request: OutputRequest = { v: 1, op: 'output', jobId, offset, waitMs };
+      try {
+        answer = await this.call<JobOutput>(this.peer, request, { ...options, timeoutMs });
+        failures = 0;
+      } catch (error) {
+        failures += 1;
+        const transient =
+          DeadDropError.is(error) &&
+          (error.retryable || error.code === 'TIMEOUT' || error.code === 'RATE_LIMITED');
+        if (!transient || failures >= POLL_ATTEMPTS || options.signal?.aborted) throw error;
+        await sleep(1000 * failures);
+      }
+    }
+  }
+
+  /**
+   * Interrupts a running job, as Ctrl-C does. Resolves false when the job is
+   * not running on the server: already over, or not started there yet.
+   */
+  async cancel(jobId: string, timeoutMs = 30_000): Promise<boolean> {
+    const request: CancelRequest = { v: 1, op: 'cancel', jobId };
+    try {
+      return (await this.call<CancelResult>(this.peer, request, { timeoutMs })).cancelled;
+    } catch (error) {
+      if (
+        DeadDropError.is(error) &&
+        error.code === 'BAD_REQUEST' &&
+        /sessionId/.test(error.message)
+      ) {
+        throw new DeadDropError(
+          'UNSUPPORTED',
+          `${this.peer} runs a ddshell that cannot cancel commands; upgrade it`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async send<Result>(
+    command: string,
+    jobId: string,
+    options: { timeoutMs?: number; close?: boolean; signal?: AbortSignal },
+    waitMs?: number,
+  ): Promise<Result> {
     const request: ExecRequest = {
       v: 1,
       op: 'exec',
       sessionId: this.id,
-      jobId: options.jobId ?? randomUUID(),
+      jobId,
       command,
       ...(this.opened ? {} : { open: true, ...(this.name ? { name: this.name } : {}) }),
       ...(options.close ? { close: true } : {}),
+      ...(waitMs === undefined ? {} : { stream: true, waitMs }),
     };
     // No `idempotencyKey`: the mailbox would then drop a deliberate re-ask for
     // the same job as a duplicate. The server's ledger deduplicates jobs instead.
-    const response = await this.call<ExecResponse>(this.peer, request, options);
+    const response = await this.call<Result>(this.peer, request, options);
     this.opened = true;
     return response;
   }

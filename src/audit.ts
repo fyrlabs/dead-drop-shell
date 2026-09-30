@@ -19,7 +19,9 @@ export type AuditEvent =
       truncated?: boolean;
       timedOut?: boolean;
       replayed?: boolean;
+      cancelled?: boolean;
     }
+  | { event: 'cancel'; controller: string; jobId: string }
   | { event: 'put' | 'get'; controller: string; transferId: string; bytes: number }
   | { event: 'refused'; controller: string; code: string; reason: string };
 

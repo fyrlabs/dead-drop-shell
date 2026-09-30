@@ -118,6 +118,29 @@ describe('ddshell processes over the git transport', () => {
     expect(await exited(server)).toBe(0);
   }, 30_000);
 
+  it('Ctrl-C on exec cancels the remote command and exits 130', async () => {
+    const serving = run(['serve', '--config', await writeConfig('vm')]);
+    server = serving.child;
+    await waitFor(() => serving.output().includes('shell server ready'), 15_000);
+
+    const exec = run([
+      'exec',
+      'vm',
+      '--config',
+      await writeConfig('laptop'),
+      '--',
+      'echo st""arted; sleep 30; echo af""ter',
+    ]);
+    await waitFor(() => exec.output().includes('started'), 20_000);
+    exec.child.kill('SIGINT');
+    expect(await exited(exec.child), exec.output()).toBe(130);
+    expect(exec.output()).not.toContain('after');
+    expect(exec.output()).toContain('cancelling');
+
+    server.kill('SIGTERM');
+    expect(await exited(server)).toBe(0);
+  }, 60_000);
+
   // Up to dead-drop 0.16.0 the mailbox stopped polling while a handler ran,
   // so one long command held up every other request to the server.
   it('answers pings, uploads and other commands while a long command runs', async () => {

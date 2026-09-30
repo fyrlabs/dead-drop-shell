@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
 import {
@@ -16,16 +17,21 @@ import { answerHello, openRequest, ReplayGuard, sealAnswer } from './envelope.js
 import { ensureKeyPair, parsePublicKey, type KeyPair, type PublicKey } from './keys.js';
 import { JobLedger } from './ledger.js';
 import { RateLimiter } from './limits.js';
+import { OutputBuffer, readStored } from './output.js';
 import {
   SHELL_CHANNEL_V2,
   SHELL_METHOD,
   SHELL_SERVICE,
   parseRequest,
+  type CancelResult,
   type CloseResult,
   type ExecRequest,
   type ExecResponse,
+  type JobOutput,
   type JobResult,
+  type OutputRequest,
   type PingResult,
+  type SessionLost,
   type SessionsResult,
   type TransferRequest,
   type TransferResponse,
@@ -48,6 +54,16 @@ export interface ServerOptions {
  * every other session. Used when the workspace does not set `concurrency`.
  */
 const DEFAULT_CONCURRENCY = 8;
+
+/**
+ * Longest a streamed `exec` or an `output` request waits for output. Each one
+ * holds a handler slot meanwhile, so this bounds how long a quiet job can keep
+ * one from a ping or a transfer.
+ */
+const MAX_WAIT_MS = 10_000;
+
+/** Once output arrives, how long an answer waits for more, so a quick command takes one answer. */
+const LINGER_MS = 100;
 
 /**
  * Variables that belong to the server, not to the shells it runs. The OS account
@@ -73,6 +89,10 @@ export class ShellServer {
     string,
     { identity: string; result: Promise<ExecResponse> }
   >();
+  /** Streamed jobs until they finish; after that the ledger answers for them. */
+  private readonly streams = new Map<string, Stream>();
+  /** Every job queued or running in a session, by id, so `cancel` can reach it. */
+  private readonly running = new Map<string, { identity: string; abort: AbortController }>();
   private readonly allowed: Set<string>;
   private readonly authorized: Map<string, PublicKey & { comment: string }>;
   private readonly home: string;
@@ -301,6 +321,8 @@ export class ShellServer {
       };
     }
     if (request.op === 'sessions') return this.list(identity);
+    if (request.op === 'output') return this.output(identity, request);
+    if (request.op === 'cancel') return this.cancel(identity, request.jobId);
     if (request.op === 'list') return this.transfers.list(request.path);
     if (request.op === 'mkdir') return this.transfers.mkdir(request);
     if (request.op !== 'exec' && request.op !== 'close') {
@@ -325,7 +347,8 @@ export class ShellServer {
    * between, so the second copy waits for the first rather than racing it past
    * the ledger.
    */
-  private exec(identity: string, request: ExecRequest): Promise<ExecResponse> {
+  private exec(identity: string, request: ExecRequest): Promise<ExecResponse | JobOutput> {
+    if (request.stream) return this.stream(identity, request);
     const inflight = this.inflight.get(request.jobId);
     if (inflight) {
       if (inflight.identity !== identity) return Promise.reject(foreignJob(request.jobId));
@@ -339,7 +362,94 @@ export class ShellServer {
     return result;
   }
 
-  private async run(identity: string, request: ExecRequest): Promise<ExecResponse> {
+  /**
+   * Starts a job and answers once `running` is persisted and output appears,
+   * the job ends, or the wait runs out. The client asks `output` for the rest,
+   * so a long command holds no handler slot. Duplicates join the same job.
+   */
+  private stream(identity: string, request: ExecRequest): Promise<JobOutput | SessionLost> {
+    const { jobId } = request;
+    let entry = this.streams.get(jobId);
+    if (entry && entry.identity !== identity) return Promise.reject(foreignJob(jobId));
+    if (!entry) {
+      const buffer = new OutputBuffer(this.options.shell.outputCapBytes);
+      let onStart!: () => void;
+      const started = new Promise<void>((resolve) => (onStart = resolve));
+      const created: Stream = { jobId, identity, buffer, started, settled: started };
+      created.settled = this.run(identity, request, { buffer, onStart })
+        .then(
+          (result) => {
+            created.result = result;
+          },
+          (error: unknown) => {
+            created.error = error;
+          },
+        )
+        .finally(() => {
+          this.streams.delete(jobId);
+          buffer.close();
+        });
+      this.streams.set(jobId, created);
+      entry = created;
+    }
+    const current = entry;
+    return Promise.race([current.started, current.settled]).then(() =>
+      this.read(current, 0, request.waitMs),
+    );
+  }
+
+  private async read(entry: Stream, offset: number, waitMs = 0): Promise<JobOutput | SessionLost> {
+    const wait = Math.min(waitMs, MAX_WAIT_MS);
+    await entry.buffer.waitFor(offset, wait);
+    const over = () => entry.result !== undefined || entry.error !== undefined;
+    if (wait > 0 && !over() && entry.buffer.end > offset) {
+      await Promise.race([entry.settled, sleep(LINGER_MS)]);
+    }
+    if (entry.error !== undefined) throw entry.error;
+    if (entry.result) {
+      return entry.result.state === 'session_lost' ? entry.result : outputOf(entry.result, offset);
+    }
+    return { jobId: entry.jobId, state: 'running', ...entry.buffer.read(offset) };
+  }
+
+  private async output(
+    identity: string,
+    { jobId, offset, waitMs }: OutputRequest,
+  ): Promise<JobOutput | SessionLost> {
+    const entry = this.streams.get(jobId);
+    if (entry) {
+      if (entry.identity !== identity) throw foreignJob(jobId);
+      return this.read(entry, offset, waitMs);
+    }
+    const record = await this.ledger.get(jobId);
+    if (!record) throw new DeadDropError('NOT_FOUND', `no job ${jobId} on this server`);
+    if (record.identity !== identity) throw foreignJob(jobId);
+    if (record.state === 'completed' && record.result) return outputOf(record.result, offset);
+    // A job started without `stream` has no output to show until it ends.
+    if (this.running.has(jobId)) {
+      return { jobId, state: 'running', offset, frames: [], next: offset, end: offset };
+    }
+    return outputOf(this.unknown(jobId), offset);
+  }
+
+  private cancel(identity: string, jobId: string): CancelResult {
+    const job = this.running.get(jobId);
+    if (!job) return { cancelled: false };
+    if (job.identity !== identity) throw foreignJob(jobId);
+    // A retried cancel must not signal twice.
+    if (!job.abort.signal.aborted) {
+      job.abort.abort();
+      this.runtime.logger.info('job cancelled', { jobId, identity });
+      this.record({ event: 'cancel', controller: identity, jobId });
+    }
+    return { cancelled: true };
+  }
+
+  private async run(
+    identity: string,
+    request: ExecRequest,
+    { buffer, onStart }: { buffer?: OutputBuffer; onStart?: () => void } = {},
+  ): Promise<ExecResponse> {
     const { jobId } = request;
     const existing = await this.ledger.get(jobId);
     if (existing) {
@@ -418,7 +528,19 @@ export class ShellServer {
       state: 'running',
       startedAt,
     });
-    const outcome = await session.run(request.command);
+    const abort = new AbortController();
+    this.running.set(jobId, { identity, abort });
+    onStart?.();
+    let outcome;
+    try {
+      outcome = await session.run(request.command, {
+        signal: abort.signal,
+        ...(buffer ? { sink: (fd: 1 | 2, bytes: Buffer) => buffer.append(fd, bytes) } : {}),
+      });
+    } finally {
+      this.running.delete(jobId);
+    }
+    const bytes = buffer ? buffer.end : outcome.stdout.length + outcome.stderr.length;
     if (outcome.sessionClosed || request.close) {
       this.sessions.delete(key);
       await session.close();
@@ -436,6 +558,8 @@ export class ShellServer {
       timedOut: outcome.timedOut,
       sessionClosed: outcome.sessionClosed || request.close === true,
       replayed: false,
+      ...(outcome.cancelled ? { cancelled: true } : {}),
+      ...(buffer ? { output: buffer.snapshot() } : {}),
     };
     await this.ledger.put({
       jobId,
@@ -452,16 +576,12 @@ export class ShellServer {
       identity,
       exitCode: outcome.exitCode,
       durationMs: outcome.durationMs,
-      bytes: outcome.stdout.length + outcome.stderr.length,
+      bytes,
       truncated: outcome.truncated,
       timedOut: outcome.timedOut,
+      cancelled: outcome.cancelled,
     });
-    this.recordJob(
-      identity,
-      request.sessionId,
-      result,
-      outcome.stdout.length + outcome.stderr.length,
-    );
+    this.recordJob(identity, request.sessionId, result, bytes);
     if (result.sessionClosed) {
       this.record({ event: 'session-close', controller: identity, sessionId: request.sessionId });
     }
@@ -540,6 +660,7 @@ export class ShellServer {
       truncated: result.truncated,
       timedOut: result.timedOut,
       replayed: result.replayed,
+      ...(result.cancelled ? { cancelled: true } : {}),
     });
   }
 
@@ -581,7 +702,45 @@ export class ShellServer {
   }
 }
 
-type Answer = ExecResponse | CloseResult | PingResult | SessionsResult | TransferResponse;
+type Answer =
+  | ExecResponse
+  | JobOutput
+  | CancelResult
+  | CloseResult
+  | PingResult
+  | SessionsResult
+  | TransferResponse;
+
+interface Stream {
+  jobId: string;
+  identity: string;
+  buffer: OutputBuffer;
+  /** Resolves once `running` is persisted. */
+  started: Promise<void>;
+  /** Resolves once the job is over, with `result` or `error` set. */
+  settled: Promise<void>;
+  result?: ExecResponse;
+  error?: unknown;
+}
+
+/** A finished job's output from `offset`, with its result once nothing is left to read. */
+function outputOf(result: JobResult, offset: number): JobOutput {
+  const { output, ...rest } = result;
+  const stored = output ?? {
+    start: 0,
+    frames: [
+      { fd: 1 as const, data: result.stdout },
+      { fd: 2 as const, data: result.stderr },
+    ].filter(({ data }) => data !== ''),
+  };
+  const slice = readStored(stored, offset);
+  return {
+    jobId: result.jobId,
+    state: result.state,
+    ...slice,
+    ...(slice.next >= slice.end ? { result: { ...rest, stdout: '', stderr: '' } } : {}),
+  };
+}
 
 interface Entry {
   identity: string;

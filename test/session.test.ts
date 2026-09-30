@@ -3,6 +3,8 @@ import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { setTimeout as sleepMs } from 'node:timers/promises';
+
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { isAlive, waitFor } from './helpers.js';
@@ -37,6 +39,19 @@ afterEach(async () => {
 });
 
 describe('TrailerScanner', () => {
+  it('passes output through at once unless it could start the trailer', () => {
+    const kept: Buffer[] = [];
+    const scanner = new TrailerScanner(Buffer.from('\nabc:'), Buffer.from(':abc\n'), (bytes) =>
+      kept.push(bytes),
+    );
+    scanner.push(Buffer.from('started'));
+    expect(Buffer.concat(kept).toString()).toBe('started');
+    scanner.push(Buffer.from('\nab'));
+    expect(Buffer.concat(kept).toString()).toBe('started');
+    scanner.push(Buffer.from('x'));
+    expect(Buffer.concat(kept).toString()).toBe('started\nabx');
+  });
+
   it('finds a trailer split across chunks', () => {
     const kept: Buffer[] = [];
     const scanner = new TrailerScanner(Buffer.from('\nabc:'), Buffer.from(':abc\n'), (bytes) =>
@@ -126,6 +141,86 @@ describe.each(shells)('ShellSession with %s', (path) => {
     expect(result.sessionClosed).toBe(true);
     expect(result.exitCode).toBeNull();
     expect(result.stdout.toString()).toBe('started\n');
+  });
+
+  it('streams output to a sink as it arrives', async () => {
+    const session = open();
+    const seen: Array<[number, string]> = [];
+    const result = await session.run('echo out; echo err >&2', {
+      sink: (fd, bytes) => seen.push([fd, bytes.toString()]),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.length + result.stderr.length).toBe(0);
+    expect(
+      seen
+        .filter(([fd]) => fd === 1)
+        .map(([, text]) => text)
+        .join(''),
+    ).toBe('out\n');
+    expect(
+      seen
+        .filter(([fd]) => fd === 2)
+        .map(([, text]) => text)
+        .join(''),
+    ).toBe('err\n');
+  });
+
+  it('cancels a command with SIGINT and keeps the session', async () => {
+    const session = open();
+    await session.run('cd / && x=kept');
+    const abort = new AbortController();
+    const running = session.run('echo started; sleep 30; echo after', {
+      signal: abort.signal,
+    });
+    await sleepMs(300);
+    abort.abort();
+    const result = await running;
+    expect(result.cancelled).toBe(true);
+    expect(result.sessionClosed).toBe(false);
+    // The rest of the line is dropped, as with Ctrl-C at a terminal.
+    expect(result.stdout.toString()).toBe('started\n');
+    expect(result.exitCode).toBe(130);
+    expect(result.durationMs).toBeLessThan(5000);
+    const after = await session.run('echo "$x"; pwd');
+    expect(after.stdout.toString()).toBe('kept\n/\n');
+    expect(after.cancelled).toBe(false);
+  });
+
+  it('breaks out of a shell loop when cancelled', async () => {
+    const session = open();
+    const abort = new AbortController();
+    const running = session.run('while :; do :; done; echo after', { signal: abort.signal });
+    await sleepMs(200);
+    abort.abort();
+    const result = await running;
+    expect(result.exitCode).toBe(130);
+    expect(result.sessionClosed).toBe(false);
+    expect(result.stdout.toString()).toBe('');
+  });
+
+  it('kills the session when a cancelled command ignores SIGINT', async () => {
+    const session = open({ cancelGraceMs: 200 });
+    const abort = new AbortController();
+    const running = session.run("trap '' INT; while :; do :; done", { signal: abort.signal });
+    await sleepMs(200);
+    abort.abort();
+    const result = await running;
+    expect(result.cancelled).toBe(true);
+    expect(result.sessionClosed).toBe(true);
+    expect(result.exitCode).toBeNull();
+  });
+
+  it('does not start a queued command that was cancelled', async () => {
+    const session = open();
+    const first = session.run('sleep 0.3; echo first');
+    const abort = new AbortController();
+    const second = session.run('echo second', { signal: abort.signal });
+    abort.abort();
+    expect((await first).stdout.toString()).toBe('first\n');
+    const result = await second;
+    expect(result.cancelled).toBe(true);
+    expect(result.exitCode).toBeNull();
+    expect(result.stdout.toString()).toBe('');
   });
 
   it('kills background jobs when closed', async () => {

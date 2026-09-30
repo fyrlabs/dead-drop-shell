@@ -9,6 +9,9 @@
 - `--session <name>` keeps a shell you can come back to, like a tmux session: `ddshell vm --session build` joins it where you left it, `ddshell exec vm --session build -- make` runs in it, and leaving keeps it open. `ddshell sessions vm` lists your live sessions.
 - `ddshell put`, `ddshell get` and scp-style `ddshell cp vm:path local` copy files. Each copy is checked with sha256 and lands whole or not at all. Files up to 64 MiB by default, sent in pieces.
 - `-r` on `put`, `get` and `cp` copies whole directories, as `scp -r` does. Small files take one round trip each.
+- Output streams while a command runs, so long commands no longer hit `--timeout` and no longer tie up the server.
+- Ctrl-C cancels the remote command, in interactive sessions and in `ddshell exec`, and keeps your session and its cwd. Press it twice to leave without waiting.
+- In bash, `declare` inside a command now needs `-g` to keep the variable for later commands.
 - `examples/ddshell-server@.service` runs one server per person, each as their own account with their own repository and secret. See `docs/per-person.md`.
 - `ddshell unit` prints a systemd unit that runs the server by absolute paths, so it works with nvm or a user npm prefix. `--template` prints the per-person one.
 - Each controller is held to 16 live sessions and 600 requests a minute by default (`shell.maxSessions`, `shell.requestsPerMinute`). A refused command is not run.

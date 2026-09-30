@@ -24,8 +24,6 @@ ddshell is not SSH and not a terminal emulator. Phase one does **not** support:
 - a PTY, terminal resize, or full-screen programs (`vim`, `top`, `less`)
 - interactive prompts, including `sudo` password prompts (every command's stdin is `/dev/null`)
 - port forwarding or WebSockets
-- streaming output: you see a command's output when it finishes
-- cancelling a running command from the client
 - SSH protocol compatibility of any kind
 
 ## Install
@@ -73,9 +71,9 @@ For a real VM over GitHub, follow [docs/github-setup.md](docs/github-setup.md).
 | `ddshell hostkey`                                                                     | On a server: prints `<peerId> ddshell-key ...`, the line a controller puts in its `knownHosts` to trust the server before first contact (see `strictHostKeys`). Makes the host key if the server has not started yet.                                                                                                                                 |
 | `ddshell unit [--account <name>] [--template]`                                        | Prints a systemd unit that starts `ddshell serve` with the absolute paths of this node and this ddshell, as `--account` (default: you). `--template` prints `ddshell-server@.service`, one server per person. See [docs/github-setup.md](docs/github-setup.md#6-run-the-server-under-systemd).                                                        |
 
-The config file is `--config`, else `$DDSHELL_CONFIG`, else `~/.deaddrop/ddshell.json`. `<target>` is looked up in `shell.targets`; an unmapped name is used as the server's peer id directly. `--timeout` is how long the client waits for an answer (default 120000). `--debug` shows runtime logs and a per-command line with the job id, server-side duration and round trip.
+The config file is `--config`, else `$DDSHELL_CONFIG`, else `~/.deaddrop/ddshell.json`. `<target>` is looked up in `shell.targets`; an unmapped name is used as the server's peer id directly. `--timeout` is how long the client waits for each answer (default 120000). Output streams as the command runs, so the command itself can take as long as the server's `commandTimeoutMs` allows. `--debug` shows runtime logs and a per-command line with the job id, server-side duration and round trip.
 
-In an interactive session, Ctrl-D closes the remote session and exits. While a command is pending, the first Ctrl-C warns that phase one cannot cancel the remote command; a second Ctrl-C or Ctrl-D abandons the local wait and exits immediately. The command may continue on the target.
+In an interactive session, Ctrl-D closes the remote session and exits. While a command runs, Ctrl-C cancels it on the target: the program gets SIGINT, the rest of the line is dropped, and the session with its cwd stays. A program that ignores SIGINT is stopped with its session after 5 s. A second Ctrl-C, or Ctrl-D, abandons the local wait and exits immediately. `ddshell exec` does the same and exits 130 once the command is cancelled. In bash, commands run inside a function, so `declare` needs `-g` to outlive the command.
 
 `exec` exit codes: the remote exit code, `124` when the command hit the server's `commandTimeoutMs`, `125` when the outcome is unknown (below), `255` when ddshell itself failed. With several targets, `exec` exits with the highest code among them, so any failure shows up as a non-zero exit.
 

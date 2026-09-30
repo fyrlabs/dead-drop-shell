@@ -47,7 +47,7 @@ Each controller, by key, gets its own `maxSessions` and `requestsPerMinute`; one
 
 ## Audit log
 
-One JSON object per line, appended as things happen: `session-open`, `exec`, `session-close`, `put`, `get` and `refused`. Every line has `time` and `controller` (`key:SHA256:...`, or `peer:<id>` for a refusal before the key was trusted), plus `name`, the key's comment, when the key is authorised. `exec` lines carry `jobId`, `sessionId`, `state`, `exitCode`, `durationMs`, output `bytes`, `truncated`, `timedOut` and `replayed`; transfer lines carry `transferId` and `bytes`; `refused` lines carry `code` and `reason`.
+One JSON object per line, appended as things happen: `session-open`, `exec`, `cancel`, `session-close`, `put`, `get` and `refused`. Every line has `time` and `controller` (`key:SHA256:...`, or `peer:<id>` for a refusal before the key was trusted), plus `name`, the key's comment, when the key is authorised. `exec` lines carry `jobId`, `sessionId`, `state`, `exitCode`, `durationMs`, output `bytes`, `truncated`, `timedOut` and `replayed`; transfer lines carry `transferId` and `bytes`; `refused` lines carry `code` and `reason`.
 
 It never holds command text, output or file paths. The ledger keeps output for `ledgerRetentionMs`; the audit log keeps who did what and how it went, for as long as you keep the file. The server reopens the file for every line, so `logrotate` can rename it without `copytruncate`. Nothing trims it, and every refused request adds a line, so a workspace member hammering the server with bad requests grows it; rotate it.
 
@@ -61,4 +61,4 @@ It is a starting point, not a measured optimum. dead-drop's frame limit is 64 Mi
 
 ## Timeouts, end to end
 
-The client waits `--timeout` (default 120 s) for an answer. That wait covers the transport both ways plus the command itself, so over GitHub, budget several seconds of transport on top of the command's own time. `requestTimeoutMs` in the workspace does not apply to ddshell commands, because the client always passes its own timeout. For `put`, `get` and `cp`, `--timeout` applies to each piece, not to the whole file.
+The client waits `--timeout` (default 120 s) for each answer. A command's output streams in answers that each wait at most 5 s on the server, so `--timeout` bounds a round trip, not the command; `commandTimeoutMs` bounds the command. Against a server older than streaming, the one answer covers the transport both ways plus the command itself. `requestTimeoutMs` in the workspace does not apply to ddshell commands, because the client always passes its own timeout. For `put`, `get` and `cp`, `--timeout` applies to each piece, not to the whole file.

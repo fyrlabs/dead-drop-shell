@@ -12,6 +12,17 @@ export interface SessionOptions {
   outputCapBytes: number;
   /** A command running longer than this kills the whole session. */
   commandTimeoutMs: number;
+  /** How long a cancelled command has to exit after SIGINT before its session is killed. */
+  cancelGraceMs?: number;
+}
+
+const DEFAULT_CANCEL_GRACE_MS = 5000;
+
+export interface RunOptions {
+  /** Takes every output byte as it arrives. The result's `stdout` and `stderr` are then empty. */
+  sink?: (fd: 1 | 2, bytes: Buffer) => void;
+  /** Aborting it cancels the command, or keeps it from starting if it is still queued. */
+  signal?: AbortSignal;
 }
 
 export interface CommandResult {
@@ -25,6 +36,7 @@ export interface CommandResult {
   timedOut: boolean;
   /** The shell is gone after this command (`exit`, timeout, crash). */
   sessionClosed: boolean;
+  cancelled: boolean;
   durationMs: number;
 }
 
@@ -35,8 +47,9 @@ export interface CommandResult {
  * The trailer is `\n<nonce>:<body>:<nonce>\n` with a fresh random nonce per
  * command, so output that merely looks like a trailer cannot end a command
  * early. The leading newline is ours, which is why it is stripped with the
- * trailer. The last `prefix.length - 1` bytes are held back because a prefix
- * can straddle two chunks.
+ * trailer. A tail that could be the start of the prefix is held back, since a
+ * prefix can straddle two chunks; everything else goes out at once, so output
+ * streams as it arrives.
  */
 export class TrailerScanner {
   private pending = Buffer.alloc(0);
@@ -58,7 +71,7 @@ export class TrailerScanner {
       const buffer = Buffer.concat([this.pending, chunk]);
       const index = buffer.indexOf(this.prefix);
       if (index === -1) {
-        const keep = Math.min(buffer.length, this.prefix.length - 1);
+        const keep = this.partial(buffer);
         this.commit(buffer.subarray(0, buffer.length - keep));
         this.pending = buffer.subarray(buffer.length - keep);
         return false;
@@ -71,6 +84,16 @@ export class TrailerScanner {
     if (end === -1) return false;
     this.body = this.trailer.subarray(0, end).toString('utf8');
     return true;
+  }
+
+  /** Length of the longest tail of `buffer` that the prefix starts with. */
+  private partial(buffer: Buffer): number {
+    for (let length = Math.min(buffer.length, this.prefix.length - 1); length > 0; length -= 1) {
+      if (buffer.subarray(buffer.length - length).equals(this.prefix.subarray(0, length))) {
+        return length;
+      }
+    }
+    return 0;
   }
 
   /** The shell died before printing a trailer: whatever was held back is output. */
@@ -124,6 +147,13 @@ export class ShellSession {
       this.child.on('exit', (code) => done(code));
       this.child.on('error', () => done(null));
     });
+    // Commands run inside a function so the INT trap can `return` from it:
+    // cancelling then drops the rest of the command line, as Ctrl-C does at a
+    // terminal, while the shell with its cwd and variables stays. The trap is
+    // reset to the default in children, so they die of the SIGINT.
+    this.child.stdin.write(
+      '__ddshell_run() { __ddshell_in=1; eval "$__ddshell_cmd" </dev/null; __ddshell_status=$?; __ddshell_in=; return $__ddshell_status; }\n',
+    );
   }
 
   get pid(): number | undefined {
@@ -131,10 +161,10 @@ export class ShellSession {
   }
 
   /** Runs `command`, queued behind any command already running in this session. */
-  run(command: string): Promise<CommandResult> {
+  run(command: string, options: RunOptions = {}): Promise<CommandResult> {
     this.pending += 1;
     const next = this.queue
-      .then(() => this.execute(command))
+      .then(() => this.execute(command, options))
       .finally(() => {
         this.pending -= 1;
         this.lastUsed = performance.now();
@@ -168,7 +198,7 @@ export class ShellSession {
     }
   }
 
-  private async execute(command: string): Promise<CommandResult> {
+  private async execute(command: string, { sink, signal }: RunOptions): Promise<CommandResult> {
     const started = performance.now();
     this.lastUsed = started;
     const result = (fields: Partial<CommandResult>): CommandResult => ({
@@ -179,11 +209,13 @@ export class ShellSession {
       truncated: false,
       timedOut: false,
       sessionClosed: this.closed,
+      cancelled: signal?.aborted === true,
       durationMs: Math.round(performance.now() - started),
       ...fields,
     });
 
     if (this.closed) return result({ sessionClosed: true });
+    if (signal?.aborted) return result({});
 
     // A syntax error inside `eval` makes a POSIX non-interactive shell exit, so
     // reject it before it can take the session down.
@@ -197,8 +229,9 @@ export class ShellSession {
     const stderr: Buffer[] = [];
     let kept = 0;
     let truncated = false;
-    const keep = (target: Buffer[]) => (bytes: Buffer) => {
+    const keep = (target: Buffer[], fd: 1 | 2) => (bytes: Buffer) => {
       if (bytes.length === 0) return;
+      if (sink) return sink(fd, Buffer.from(bytes));
       const room = this.options.outputCapBytes - kept;
       if (bytes.length > room) truncated = true;
       if (room <= 0) return;
@@ -206,10 +239,19 @@ export class ShellSession {
       target.push(Buffer.from(slice));
       kept += slice.length;
     };
-    const out = new TrailerScanner(prefix, suffix, keep(stdout));
-    const err = new TrailerScanner(prefix, suffix, keep(stderr));
+    const out = new TrailerScanner(prefix, suffix, keep(stdout, 1));
+    const err = new TrailerScanner(prefix, suffix, keep(stderr, 2));
 
     let timer: NodeJS.Timeout | undefined;
+    let grace: NodeJS.Timeout | undefined;
+    const cancel = () => {
+      this.kill('SIGINT');
+      grace = setTimeout(
+        () => void this.close(),
+        this.options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS,
+      );
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
     const outcome = await new Promise<'done' | 'exited' | 'timeout'>((resolve) => {
       const check = () => {
         if (out.body !== undefined && err.body !== undefined) resolve('done');
@@ -231,8 +273,13 @@ export class ShellSession {
       this.child.stdin.write(
         [
           `__ddshell_cmd=${shellQuote(command)}`,
-          `eval "$__ddshell_cmd" </dev/null`,
-          `__ddshell_status=$?`,
+          // Set each time: the command may have replaced it.
+          `trap '__ddshell_int=1; [ -n "$__ddshell_in" ] && return 130' INT`,
+          '__ddshell_int=',
+          '__ddshell_run',
+          '__ddshell_status=$?',
+          '__ddshell_in=',
+          '[ -n "$__ddshell_int" ] && __ddshell_status=130',
           `printf '\\n%s:%s:%s:%s\\n' ${nonce} "$__ddshell_status" "$PWD" ${nonce}`,
           `printf '\\n%s:end:%s\\n' ${nonce} ${nonce} >&2`,
           '',
@@ -240,6 +287,8 @@ export class ShellSession {
       );
     }).finally(() => {
       clearTimeout(timer);
+      clearTimeout(grace);
+      signal?.removeEventListener('abort', cancel);
       this.onExit = undefined;
     });
     this.child.stdout.removeAllListeners('data');

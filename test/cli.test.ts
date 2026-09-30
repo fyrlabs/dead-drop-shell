@@ -514,15 +514,32 @@ describe('ddshell cli', () => {
     expect(await promptly(running)).toBe(0);
   });
 
-  it('a second Ctrl-C abandons a pending command immediately', async () => {
+  it('Ctrl-C cancels the remote command and keeps the session', async () => {
     const streams = terminalIo();
     const running = main(['vm', '--config', controllerConfig], streams);
     await waitFor(() => streams.out().includes('vm:~$ '));
 
-    streams.stdin.write('sleep 30\n');
+    // Split quotes, so the echoed input line never matches the output checked for.
+    streams.stdin.write('cd /; echo st""arted; sleep 30; echo af""ter\n');
+    await waitFor(() => streams.out().includes('started'));
+    streams.stdin.write('\u0003');
+    await waitFor(() => streams.err().includes('press Ctrl-C again to leave'));
+    await waitFor(() => streams.out().includes('vm:/$ '), 10_000);
+    expect(streams.out()).not.toContain('after');
+
+    streams.stdin.write('exit\n');
+    expect(await promptly(running)).toBe(0);
+  });
+
+  it('a second Ctrl-C abandons a command that ignores the first', async () => {
+    const streams = terminalIo();
+    const running = main(['vm', '--config', controllerConfig], streams);
+    await waitFor(() => streams.out().includes('vm:~$ '));
+
+    streams.stdin.write("trap '' INT; sleep 30\n");
     await waitForRunningJob();
     streams.stdin.write('\u0003');
-    await waitFor(() => streams.err().includes('Press Ctrl-C again to leave'));
+    await waitFor(() => streams.err().includes('press Ctrl-C again to leave'));
     streams.stdin.write('\u0003');
 
     expect(await promptly(running)).toBe(0);

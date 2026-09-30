@@ -419,6 +419,96 @@ describe('ddshell over the filesystem transport', () => {
   });
 });
 
+describe('streaming output and cancel', () => {
+  const collect = () => {
+    const seen: Array<{ fd: number; text: string; at: number }> = [];
+    return {
+      seen,
+      onOutput: (fd: 1 | 2, bytes: Buffer) =>
+        seen.push({ fd, text: bytes.toString(), at: Date.now() }),
+      text: (fd: number) =>
+        seen
+          .filter((piece) => piece.fd === fd)
+          .map((piece) => piece.text)
+          .join(''),
+    };
+  };
+
+  it('streams output while the command runs and ends with its result', async () => {
+    await startServer();
+    const session = (await startClient()).session('vm');
+    const output = collect();
+    const started = Date.now();
+    const result = completed(
+      await session.run('echo one; echo warn >&2; sleep 1.5; echo two', {
+        timeoutMs: 10_000,
+        onOutput: output.onOutput,
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.out).toBe('');
+    expect(output.text(1)).toBe('one\ntwo\n');
+    expect(output.text(2)).toBe('warn\n');
+    const first = output.seen.find((piece) => piece.text.includes('one'))!;
+    expect(first.at - started).toBeLessThan(1200);
+  });
+
+  it('answers a re-asked streamed job from the ledger without running it again', async () => {
+    await startServer();
+    const session = (await startClient()).session('vm');
+    const jobId = randomUUID();
+    const first = collect();
+    await session.run('echo ran >> count; echo out', { jobId, onOutput: first.onOutput });
+    const again = collect();
+    const replayed = completed(
+      await session.run('echo ran >> count', { jobId, onOutput: again.onOutput }),
+    );
+    expect(replayed.replayed).toBe(true);
+    expect(again.text(1)).toBe('out\n');
+    expect(await readFile(join(home, 'count'), 'utf8')).toBe('ran\n');
+  });
+
+  it('cancels a running command and keeps its session', async () => {
+    await startServer();
+    const session = (await startClient()).session('vm');
+    await run(session, 'cd / && x=kept');
+    const jobId = randomUUID();
+    const output = collect();
+    const running = session.run('echo started; sleep 30; echo after', {
+      jobId,
+      onOutput: output.onOutput,
+    });
+    await waitFor(() => output.text(1).includes('started'), 5000);
+    expect(await session.cancel(jobId)).toBe(true);
+    const result = completed(await running);
+    expect(result.cancelled).toBe(true);
+    expect(result.exitCode).toBe(130);
+    expect(output.text(1)).toBe('started\n');
+    expect(await session.cancel(jobId)).toBe(false);
+    expect((await run(session, 'echo "$x"; pwd')).out).toBe('kept\n/\n');
+  });
+
+  it('keeps long streamed commands from starving pings', async () => {
+    await startServer();
+    const client = await startClient('laptop', { maxSessions: 32 });
+    const jobs = Array.from({ length: 12 }, () => {
+      const session = client.session('vm');
+      const jobId = randomUUID();
+      return {
+        session,
+        jobId,
+        done: session.run('sleep 30', { jobId, onOutput: () => undefined }),
+      };
+    });
+    await waitFor(() => false, 1500).catch(() => undefined);
+    const { result, roundTripMs } = await client.ping('vm', { timeoutMs: 20_000 });
+    expect(result).toBeDefined();
+    expect(roundTripMs).toBeLessThan(15_000);
+    await Promise.all(jobs.map(({ session, jobId }) => session.cancel(jobId)));
+    await Promise.all(jobs.map(({ done }) => done));
+  }, 60_000);
+});
+
 describe('per-controller limits and the audit log', () => {
   it('refuses a session past maxSessions without running the command', async () => {
     await startServer({ maxSessions: 1, allowControllers: ['laptop', 'desktop'] });

@@ -3,6 +3,7 @@ import { hostname, tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -409,12 +410,49 @@ async function exec(
     debug: options.debug,
     onNewHost: pinned(io),
   });
+  const jobs: Jobs = new Map();
+  const abort = new AbortController();
+  let interrupts = 0;
+  const interrupt = () => {
+    interrupts += 1;
+    if (interrupts > 1) return abort.abort();
+    io.stderr.write('[ddshell] cancelling; press Ctrl-C again to leave without waiting\n');
+    for (const [jobId, session] of jobs) {
+      void cancel(io, session, jobId, () => jobs.has(jobId));
+    }
+  };
+  process.on('SIGINT', interrupt);
   try {
     return await fanOut(io, targets, (out, target) =>
-      execOne(out, client, config, target, command, options),
+      execOne(out, client, config, target, command, options, jobs, abort.signal),
     );
   } finally {
+    process.off('SIGINT', interrupt);
     await client.stop();
+  }
+}
+
+/** Jobs waiting on an answer, so Ctrl-C can cancel them. */
+type Jobs = Map<string, RemoteSession>;
+
+/**
+ * Asks the target to cancel a job, and asks again while it is still pending
+ * here: a cancel that arrives before the job starts finds nothing to stop.
+ */
+async function cancel(
+  io: Io,
+  session: RemoteSession,
+  jobId: string,
+  pending: () => boolean,
+): Promise<void> {
+  while (pending()) {
+    try {
+      if (await session.cancel(jobId)) return;
+    } catch (error) {
+      io.stderr.write(`[ddshell] ${describe(error)}\n`);
+      return;
+    }
+    await sleep(1000);
   }
 }
 
@@ -667,16 +705,21 @@ async function execOne(
   target: string,
   command: string,
   { timeoutMs, debug, name }: SessionOptions,
+  jobs: Jobs,
+  signal: AbortSignal,
 ): Promise<number> {
   const session = client.session(resolveTarget(config.shell, target), name);
   const response = await send(io, session, command, {
     timeoutMs,
     debug,
+    jobs,
+    signal,
     ...(name === undefined ? { close: true } : {}),
   });
-  if (response === undefined) return 255;
+  if (response === undefined) return signal.aborted ? 130 : 255;
   if (response.state === 'unknown') return 125;
   if (response.state === 'session_lost') return 255;
+  if (response.cancelled) return response.exitCode ?? 130;
   if (response.timedOut) return 124;
   return response.exitCode ?? 255;
 }
@@ -729,6 +772,7 @@ async function interactive(
   let waiting = false;
   let interrupts = 0;
   let currentAbort: AbortController | undefined;
+  const jobs: Jobs = new Map();
   let abandonSession = false;
   let sessionEnded = false;
   const terminal = io.stdin.isTTY === true;
@@ -782,9 +826,10 @@ async function interactive(
       lines.close();
       return;
     }
-    io.stderr.write(
-      '\n[ddshell] phase one cannot cancel a remote command; it keeps running on the target. Press Ctrl-C again to leave.\n',
-    );
+    io.stderr.write('\n[ddshell] cancelling; press Ctrl-C again to leave\n');
+    for (const [jobId, running] of jobs) {
+      void cancel(io, running, jobId, () => jobs.has(jobId));
+    }
   });
 
   let status = 0;
@@ -803,6 +848,7 @@ async function interactive(
         response = await send(io, session, line, {
           timeoutMs,
           debug,
+          jobs,
           signal: currentAbort.signal,
         });
       } finally {
@@ -846,18 +892,28 @@ async function send(
   io: Io,
   session: RemoteSession,
   command: string,
-  options: { timeoutMs: number; debug: boolean; close?: boolean; signal?: AbortSignal },
+  options: {
+    timeoutMs: number;
+    debug: boolean;
+    jobs: Jobs;
+    close?: boolean;
+    signal?: AbortSignal;
+  },
 ): Promise<ExecResponse | undefined> {
   const note = (message: string) => io.stderr.write(`[ddshell] ${message}\n`);
   const jobId = crypto.randomUUID();
   const started = performance.now();
   let response: ExecResponse;
+  options.jobs.set(jobId, session);
   try {
-    response = await session.exec(command, {
+    response = await session.run(command, {
       jobId,
       timeoutMs: options.timeoutMs,
       ...(options.close ? { close: true } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
+      onOutput: (fd, bytes) => (fd === 1 ? io.stdout : io.stderr).write(bytes),
+      onDropped: (bytes) =>
+        note(`${bytes} bytes of output dropped: the server keeps outputCapBytes per command`),
     });
   } catch (error) {
     if (options.signal?.aborted && DeadDropError.is(error) && error.code === 'CANCELLED') {
@@ -871,6 +927,8 @@ async function send(
       note(describe(error));
     }
     return undefined;
+  } finally {
+    options.jobs.delete(jobId);
   }
 
   if (response.state === 'session_lost') {
@@ -886,7 +944,11 @@ async function send(
   io.stdout.write(Buffer.from(response.stdout, 'base64'));
   io.stderr.write(Buffer.from(response.stderr, 'base64'));
   if (response.truncated) note('output truncated at the server output cap');
-  if (response.timedOut)
+  if (response.cancelled && response.exitCode === null && !response.sessionClosed) {
+    note('cancelled before it started; the command was not run');
+  } else if (response.cancelled && response.sessionClosed) {
+    note('the command ignored SIGINT; its session was killed');
+  } else if (response.timedOut)
     note('command exceeded the server command timeout; its session was killed');
   else if (response.sessionClosed && !options.close) note('remote session closed');
   if (options.debug) {

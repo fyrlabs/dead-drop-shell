@@ -17,6 +17,7 @@ npm run format      # prettier --write
 | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `src/session.ts`  | `ShellSession`: one long-lived child shell, nonce-delimited command trailer, output cap, timeouts                   |
 | `src/ledger.ts`   | `JobLedger`: one JSON file per job id, atomic writes, `running` becomes `unknown` on open                           |
+| `src/output.ts`   | `OutputBuffer`: a streamed job's output window, offsets over stdout and stderr together                             |
 | `src/protocol.ts` | `shell.v1` request and response types, `parseRequest`                                                               |
 | `src/keys.ts`     | key pairs (Ed25519 + X25519), `ddshell-key` lines, fingerprints, `KnownHosts`                                       |
 | `src/envelope.ts` | `shell.v2`: hello, sealed and signed calls and answers, `ReplayGuard`                                               |
