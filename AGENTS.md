@@ -13,25 +13,28 @@ npm run format      # prettier --write
 
 ## Layout
 
-| Path              | Contents                                                                                                            |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `src/session.ts`  | `ShellSession`: one long-lived child shell, nonce-delimited command trailer, output cap, timeouts                   |
-| `src/ledger.ts`   | `JobLedger`: one JSON file per job id, atomic writes, `running` becomes `unknown` on open                           |
-| `src/output.ts`   | `OutputBuffer`: a streamed job's output window, offsets over stdout and stderr together                             |
-| `src/protocol.ts` | `shell.v1` request and response types, `parseRequest`                                                               |
-| `src/keys.ts`     | key pairs (Ed25519 + X25519), `ddshell-key` lines, fingerprints, `KnownHosts`                                       |
-| `src/envelope.ts` | `shell.v2`: hello, sealed and signed calls and answers, `ReplayGuard`                                               |
-| `src/transfer.ts` | `ServerTransfers` (put/get state, temp file, commit, list, mkdir), `hashFile`, `destination`, `walk`                |
-| `src/version.ts`  | `VERSION` and `DEAD_DROP_VERSION`, read from the package manifests                                                  |
-| `src/unit.ts`     | `systemdUnit`: `ddshell unit` output; must match `examples/ddshell-server@.service` apart from `ExecStart` (tested) |
-| `src/limits.ts`   | `RateLimiter`: token bucket per controller for `shell.requestsPerMinute`                                            |
-| `src/audit.ts`    | `AuditLog`: JSON lines per session, command, transfer and refusal; never command text or paths                      |
-| `src/config.ts`   | `shell` config section, defaults, `loadConfig`                                                                      |
-| `src/server.ts`   | `ShellServer`: embedded runtime, authorisation, sessions, ledger, idle sweep                                        |
-| `src/client.ts`   | `ShellClient`, `RemoteSession`                                                                                      |
-| `src/check.ts`    | `ddshell check`: config, secret file modes, server shell and ledger, transports, target beacons                     |
-| `src/cli.ts`      | argument parsing, interactive loop, `exec`, exit codes                                                              |
-| `test/`           | unit tests plus integration tests over dead-drop's filesystem transport                                             |
+| Path                | Contents                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `src/session.ts`    | `ShellSession`: one long-lived child shell, nonce-delimited command trailer, output cap, timeouts                   |
+| `src/ledger.ts`     | `JobLedger`: one JSON file per job id, atomic writes, `running` becomes `unknown` on open                           |
+| `src/output.ts`     | `OutputBuffer`: a streamed job's output window, offsets over stdout and stderr together                             |
+| `src/protocol.ts`   | `shell.v1` request and response types, `parseRequest`                                                               |
+| `src/keys.ts`       | key pairs (Ed25519 + X25519), `ddshell-key` lines, fingerprints, `KnownHosts`                                       |
+| `src/envelope.ts`   | `shell.v2`: hello, sealed and signed calls and answers, `ReplayGuard`                                               |
+| `src/transfer.ts`   | `ServerTransfers` (put/get state, temp file, commit, list, mkdir), `hashFile`, `destination`, `walk`                |
+| `src/version.ts`    | `VERSION` and `DEAD_DROP_VERSION`, read from the package manifests                                                  |
+| `src/unit.ts`       | `systemdUnit`: `ddshell unit` output; must match `examples/ddshell-server@.service` apart from `ExecStart` (tested) |
+| `src/limits.ts`     | `RateLimiter`: token bucket per controller for `shell.requestsPerMinute`                                            |
+| `src/audit.ts`      | `AuditLog`: JSON lines per session, command, transfer and refusal; never command text or paths                      |
+| `src/config.ts`     | `shell` config section, defaults, `loadConfig`                                                                      |
+| `src/tty.ts`        | `loadPty` (optional node-pty, chmods `spawn-helper`), `TtySession`: one shell on a pty                              |
+| `src/forward.ts`    | `TcpStream`: one server-side TCP connection for `ddshell forward`                                                   |
+| `src/tty-client.ts` | `RemoteStream` (terminal or TCP: reader and writer loops, numbered input), `openTty`, `openTcp`                     |
+| `src/server.ts`     | `ShellServer`: embedded runtime, authorisation, sessions, ledger, idle sweep                                        |
+| `src/client.ts`     | `ShellClient`, `RemoteSession`                                                                                      |
+| `src/check.ts`      | `ddshell check`: config, secret file modes, server shell and ledger, transports, target beacons                     |
+| `src/cli.ts`        | argument parsing, interactive loop, `exec`, exit codes                                                              |
+| `test/`             | unit tests plus integration tests over dead-drop's filesystem transport                                             |
 
 ## Invariants: do not break these
 
@@ -48,6 +51,7 @@ npm run format      # prettier --write
 - Never change how `namedSessionId` derives an id from a name: clients of different versions must find the same session.
 - A transferred file reaches its destination only by rename after its size and sha256 match. Every transfer step stays idempotent; that is what makes client retries safe.
 - Never hard-code the version. `VERSION` comes from `package.json`.
+- A server connects only to a `host:port` that `shell.allowForwards` lists exactly, checked before anything is resolved or opened. Terminals and forwards are never put in the ledger and never rerun; input is applied by byte offset (`freshInput`) so a duplicate request sends nothing twice. Never log or audit terminal or forwarded bytes.
 - The server is POSIX only. Anything shell-specific must work under `dash`, not just `bash`.
 - Use only dead-drop's public exports. Anything dead-drop is missing goes in [docs/upstream-requirements.md](docs/upstream-requirements.md), not in a workaround that reaches into its internals.
 

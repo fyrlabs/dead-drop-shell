@@ -96,6 +96,12 @@ A command past `commandTimeoutMs`, a server shutdown, or an idle timeout kills t
 
 A terminal counts toward `maxSessions`, is closed by the idle sweep, and is never in the ledger: a restart ends it and `tty-io` on a lost id answers `session_lost` without typing. The audit log records open and close only, never keys or screen bytes. node-pty has no Linux prebuilds, so a server needs a compiler; without it a tty request answers UNSUPPORTED and `ddshell check` warns. The loader sets the execute bit on `spawn-helper`, which the 1.1.0 tarball ships without it.
 
+## Port forwarding
+
+`ddshell forward <target> -L` is the terminal's design over a TCP socket. `tcp-open` makes the server connect to `host:port` after checking the exact `host:port` against `shell.allowForwards` (default empty, nothing resolved or connected before that check, a refusal has no effect and is audited as `refused`). `tcp-io` sends numbered input bytes and long-polls the far end's bytes from an `OutputBuffer`, `tcp-close` ends it. A connection counts toward `maxSessions`, is swept when idle, and is never in the ledger. The client side is `RemoteStream`, the same reader and writer loops as the terminal, with a 1 MiB high-water mark that pauses the local socket until the link catches up. The audit log records the allow-list entry that was reached, never the bytes.
+
+Each batch of bytes is one request, so a connection moves one batch per round trip in each direction. That is workable on the filesystem transport and hopeless over GitHub. `-R` would need the server to accept connections and the client to poll for them; it is not built.
+
 ## Ledger
 
 `<ledgerDir>/<jobId>.json`, mode 0600 in a 0700 directory, written to a temporary file, flushed, then renamed. Job ids must be UUIDs because they become file names. Records hold the result for replay but never the command text. At startup every `running` record becomes `unknown`. Finished records are pruned after `ledgerRetentionMs`.
@@ -104,4 +110,4 @@ The ledger stores command output for the retention window. That is the price of 
 
 ## What is deliberately missing
 
-No reconnecting to a session or a terminal after a server restart, and no reattaching to a terminal after leaving it. No local echo prediction in `--tty`. These are phase four in the parent project's [application extension proposal](https://github.com/fyrlabs/dead-drop/blob/main/docs/proposals/0001-application-extensions.md). There is also no generic plugin host here; [upstream-requirements.md](upstream-requirements.md) records what one would need.
+No `-R` forwarding, no reconnecting to a session, a terminal or a forward after a server restart, and no reattaching to a terminal after leaving it. No local echo prediction in `--tty`. These are phase four in the parent project's [application extension proposal](https://github.com/fyrlabs/dead-drop/blob/main/docs/proposals/0001-application-extensions.md). There is also no generic plugin host here; [upstream-requirements.md](upstream-requirements.md) records what one would need.

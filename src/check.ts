@@ -82,6 +82,14 @@ export async function check(path: string, debug = false): Promise<Finding[]> {
     } catch (error) {
       add('warn', 'server', `${describe(error)}; line mode is unaffected`);
     }
+    const { allowForwards } = config.shell;
+    add(
+      'ok',
+      'server',
+      allowForwards.length === 0
+        ? 'forwarding is off: shell.allowForwards is empty'
+        : `forwarding allowed to ${allowForwards.join(', ')}`,
+    );
     const ledger = await writableAncestor(config.shell.ledgerDir);
     if (ledger.ok) add('ok', 'server', `ledger ${config.shell.ledgerDir} can be written`);
     else add('fail', 'server', `ledger ${config.shell.ledgerDir}: ${ledger.reason}`);

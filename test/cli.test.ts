@@ -384,6 +384,7 @@ describe('ddshell cli', () => {
     expect(streams.out()).toMatch(/ok {4}server: ledger .*ddshell-ledger can be written\n/);
     expect(streams.out()).toMatch(/ok {4}server: audit log .*ddshell-audit\.log can be written\n/);
     expect(streams.out()).toMatch(/(ok|warn) +server: .*(node-pty|terminal mode)/);
+    expect(streams.out()).toContain(`forwarding allowed to 127.0.0.1:${echoPort}`);
     expect(streams.out()).toMatch(/ok {4}server: authorises laptop \(\S+\)\n/);
     expect(streams.out()).toMatch(/ok {4}server: host key .*vm\.host_key: \S+\n/);
   });
