@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { ShellCall } from '../src/client.js';
 import type { ShellRequest, TtyIoRequest, TtyOutput } from '../src/protocol.js';
-import { RemoteTty } from '../src/tty-client.js';
+import { openTty } from '../src/tty-client.js';
 import { waitFor } from './helpers.js';
 
 /** A server that applies input by offset, as TtySession does, and can fail on demand. */
@@ -41,7 +41,9 @@ function fakeServer(failures: string[]) {
 describe('RemoteTty', () => {
   it('resends keys after a timed-out request without typing them twice', async () => {
     const server = fakeServer(['no answer']);
-    const tty = new RemoteTty(server.call, 'vm', randomUUID(), '/home');
+    const tty = await openTty(server.call, 'vm', randomUUID(), { cols: 80, rows: 24 }, undefined, {
+      timeoutMs: 1000,
+    });
     const stop = new AbortController();
     const attached = tty.attach({
       timeoutMs: 1000,
@@ -60,10 +62,17 @@ describe('RemoteTty', () => {
   }, 15_000);
 
   it('gives up on an error a retry cannot cure', async () => {
+    let opened = false;
     const call = (async () => {
+      if (!opened) {
+        opened = true;
+        return { ttyId: 'x', home: '/home' };
+      }
       throw new DeadDropError('UNAUTHORIZED', 'not authorised');
     }) as unknown as ShellCall;
-    const tty = new RemoteTty(call, 'vm', randomUUID(), '/home');
+    const tty = await openTty(call, 'vm', randomUUID(), { cols: 80, rows: 24 }, undefined, {
+      timeoutMs: 1000,
+    });
     await expect(tty.attach({ timeoutMs: 1000, onOutput: () => undefined })).rejects.toMatchObject({
       code: 'UNAUTHORIZED',
     });

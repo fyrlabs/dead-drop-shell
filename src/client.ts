@@ -41,7 +41,15 @@ import {
   namedSessionId,
 } from './protocol.js';
 import { destination, hashFile, makeTree, temporaryPath, walk } from './transfer.js';
-import { RemoteTty, transient, type TtySize } from './tty-client.js';
+import {
+  openTcp,
+  openTty,
+  transient,
+  type RemoteStream,
+  type RemoteTty,
+  type TcpEnd,
+  type TtySize,
+} from './tty-client.js';
 
 export interface ClientOptions {
   runtime: RuntimeConfig;
@@ -270,7 +278,7 @@ export class ShellClient {
   ): Promise<RemoteTty> {
     const { term, ...call } = options;
     try {
-      return await RemoteTty.open(this.call, peer, randomUUID(), size, term, call);
+      return await openTty(this.call, peer, randomUUID(), size, term, call);
     } catch (error) {
       if (
         DeadDropError.is(error) &&
@@ -280,6 +288,32 @@ export class ShellClient {
         throw new DeadDropError(
           'UNSUPPORTED',
           `${peer} runs a ddshell without terminal mode; upgrade it to use --tty`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Opens a TCP connection from `peer` to `target`. UNSUPPORTED when the server
+   * is older than forwarding; UNAUTHORIZED when its `allowForwards` lacks it.
+   */
+  async forward(
+    peer: string,
+    target: { host: string; port: number },
+    options: { timeoutMs: number; signal?: AbortSignal },
+  ): Promise<RemoteStream<TcpEnd>> {
+    try {
+      return await openTcp(this.call, peer, randomUUID(), target, options);
+    } catch (error) {
+      if (
+        DeadDropError.is(error) &&
+        error.code === 'BAD_REQUEST' &&
+        /sessionId|unknown shell operation/.test(error.message)
+      ) {
+        throw new DeadDropError(
+          'UNSUPPORTED',
+          `${peer} runs a ddshell without port forwarding; upgrade it to use forward`,
         );
       }
       throw error;

@@ -2,6 +2,7 @@ import { access, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { hostname, tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { createServer, type Socket } from 'node:net';
 import { createInterface } from 'node:readline';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Writable } from 'node:stream';
@@ -38,6 +39,7 @@ const USAGE = `ddshell ${VERSION}: a line-oriented remote shell over dead-drop. 
 Usage:
   ddshell serve [--config <file>]
   ddshell <target> [--session <name>] [--config <file>] [--timeout <ms>] [--debug]
+  ddshell forward <target> -L [<bind>:]<port>:<host>:<port> [-L ...] [--config <file>] [--timeout <ms>] [--debug]
   ddshell <target> --tty [--config <file>] [--timeout <ms>] [--debug]
   ddshell exec <target>[,<target>...] [--session <name>] [--config <file>] [--timeout <ms>] [--debug] -- <command...>
   ddshell sessions <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug]
@@ -60,6 +62,10 @@ each output line is prefixed with its target and the exit code is the highest.
 running on exit; it closes on \`exit\` or after the server's idle timeout.
 jobs lists your jobs in the server's ledger, newest first, and status shows one by
 its id or a unique prefix of it. Neither shows commands or output.
+forward listens on this machine and relays each connection through the server to a
+host:port its shell.allowForwards lists, like ssh -L. It prints each listening
+address and runs until Ctrl-C. Every byte costs transport round trips, so it suits fast
+transports; over GitHub expect timeouts. A server without forwarding is reported as unsupported.
 --tty runs a shell on a pseudo-terminal, so vim, top and tab completion work. Keys
 travel in batches and the screen comes back by long poll: expect each keystroke to
 echo after a round trip. The server needs node-pty built (python3, make, g++ on
@@ -106,6 +112,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         count: { type: 'string' },
         session: { type: 'string' },
         tty: { type: 'boolean', default: false },
+        local: { type: 'string', short: 'L', multiple: true },
         debug: { type: 'boolean', default: false },
         recursive: { type: 'boolean', short: 'r', default: false },
         file: { type: 'string', short: 'f' },
@@ -163,6 +170,9 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     if (command === 'keygen') {
       if (target !== undefined) throw usage('keygen takes no positional arguments');
       return await keygen(io, configPath, values);
+    }
+    if (values.local !== undefined && command !== 'forward') {
+      throw usage('-L applies to forward only');
     }
     if (values.tty && (named === false || command === 'exec' || values.session !== undefined)) {
       throw usage('--tty applies to an interactive shell: ddshell <target> --tty');
@@ -238,6 +248,21 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         name: values.session,
       });
     }
+    if (command === 'forward') {
+      if (target === undefined) throw usage('forward needs a target');
+      if (rest.length > 0) throw usage(`unexpected argument "${rest[0]}"`);
+      if (values.local === undefined) throw usage('forward needs at least one -L');
+      return await forwardPorts(
+        io,
+        config,
+        single(target, 'forward'),
+        values.local.map(parseLocal),
+        {
+          timeoutMs,
+          debug: values.debug,
+        },
+      );
+    }
     if (command === 'sessions') {
       if (target === undefined) throw usage('sessions needs a target');
       if (rest.length > 0) throw usage(`unexpected argument "${rest[0]}"`);
@@ -306,6 +331,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
 
 /** A first word that is one of these is a subcommand, not a target. */
 const COMMANDS = new Set([
+  'forward',
   'serve',
   'check',
   'keygen',
@@ -334,7 +360,9 @@ function single(target: string, command = 'get'): string {
     throw usage(
       command === 'get'
         ? 'get takes one target: several would write the same local file'
-        : `${command} takes one target: job ids are per server`,
+        : command === 'forward'
+          ? 'forward takes one target: a local port reaches one server'
+          : `${command} takes one target: job ids are per server`,
     );
   }
   return first!;
@@ -1039,6 +1067,123 @@ async function interactive(
     await client.stop();
   }
   return status;
+}
+
+interface LocalForward {
+  bind: string;
+  port: number;
+  host: string;
+  targetPort: number;
+}
+
+/** `[bind:]port:host:port`, as ssh -L. `port` 0 picks a free one. IPv6 literals are not supported. */
+function parseLocal(spec: string): LocalForward {
+  const parts = spec.split(':');
+  const [bind, port, host, targetPort] = parts.length === 3 ? ['127.0.0.1', ...parts] : parts;
+  const valid = (value: string | undefined) =>
+    /^\d{1,5}$/.test(value ?? '') && Number(value) <= 65535;
+  if (
+    (parts.length !== 3 && parts.length !== 4) ||
+    !bind ||
+    !host ||
+    !valid(port) ||
+    !valid(targetPort) ||
+    Number(targetPort) === 0
+  ) {
+    throw usage(`-L "${spec}" is not [bind:]port:host:port`);
+  }
+  return { bind, port: Number(port), host, targetPort: Number(targetPort) };
+}
+
+/**
+ * `ddshell forward <target> -L ...`: listens here, and relays each connection
+ * through the server. A connection that cannot be opened is closed with a note;
+ * the listeners keep going until Ctrl-C.
+ */
+async function forwardPorts(
+  io: Io,
+  config: Loaded,
+  target: string,
+  forwards: LocalForward[],
+  { timeoutMs, debug }: { timeoutMs: number; debug: boolean },
+): Promise<number> {
+  const note = (message: string) => io.stderr.write(`[ddshell] ${message}\n`);
+  const peer = resolveTarget(config.shell, target);
+  const client = await ShellClient.start({ ...config, debug, onNewHost: pinned(io) });
+  const live = new Set<Socket>();
+  const servers = forwards.map((forward) => {
+    const server = createServer((socket) => {
+      live.add(socket);
+      socket.on('close', () => live.delete(socket));
+      void relay(socket, forward);
+    });
+    return { server, forward };
+  });
+
+  const relay = async (socket: Socket, { host, targetPort }: LocalForward) => {
+    socket.on('error', () => undefined);
+    // Bytes that arrive while the remote end is still being opened wait here.
+    socket.pause();
+    const left = new AbortController();
+    socket.on('close', () => left.abort());
+    let stream;
+    try {
+      stream = await client.forward(
+        peer,
+        { host, port: targetPort },
+        { timeoutMs, signal: left.signal },
+      );
+    } catch (error) {
+      if (!left.signal.aborted) note(`${host}:${targetPort}: ${describe(error)}`);
+      socket.destroy();
+      return;
+    }
+    socket.on('data', (bytes) => {
+      if (stream.type(bytes)) return;
+      socket.pause();
+      stream.onDrain = () => socket.resume();
+    });
+    socket.resume();
+    try {
+      const end = await stream.attach({
+        timeoutMs,
+        signal: left.signal,
+        onOutput: (bytes) => socket.write(bytes),
+        onDropped: (bytes) => note(`${bytes} bytes from ${host}:${targetPort} dropped`),
+      });
+      if (end?.error !== undefined) note(`${host}:${targetPort}: connection ended: ${end.error}`);
+    } catch (error) {
+      note(`${host}:${targetPort}: ${describe(error)}`);
+    } finally {
+      socket.end();
+      await stream.close().catch(() => undefined);
+    }
+  };
+
+  try {
+    for (const { server, forward } of servers) {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(forward.port, forward.bind, () => {
+          const address = server.address();
+          const port = typeof address === 'object' && address ? address.port : forward.port;
+          note(
+            `listening on ${forward.bind}:${port} -> ${target} -> ${forward.host}:${forward.targetPort}`,
+          );
+          resolve();
+        });
+      });
+    }
+    await new Promise<void>((resolve) => {
+      process.once('SIGINT', resolve);
+      process.once('SIGTERM', resolve);
+    });
+    return 0;
+  } finally {
+    for (const { server } of servers) server.close();
+    for (const socket of live) socket.destroy();
+    await client.stop();
+  }
 }
 
 /** What the server accepts as `$TERM`. Anything else is left for the shell's default. */

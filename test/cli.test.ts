@@ -11,6 +11,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { connect, createServer, type Server } from 'node:net';
 import { PassThrough } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -28,6 +29,9 @@ let root: string;
 let home: string;
 let server: ShellServer;
 let controllerConfig: string;
+/** A local TCP echo service, the only host:port the test server lets controllers forward to. */
+let echo: Server;
+let echoPort: number;
 
 async function writeConfig(peerId: string, secretFile: string): Promise<string> {
   const path = join(root, `${peerId}.json`);
@@ -52,6 +56,7 @@ async function writeConfig(peerId: string, secretFile: string): Promise<string> 
       ],
       shell: {
         authorizedKeys,
+        allowForwards: [`127.0.0.1:${echoPort}`],
         key: `./${peerId}.key`,
         hostKey: `./${peerId}.host_key`,
         knownHosts: `./${peerId}.known_hosts`,
@@ -134,6 +139,9 @@ async function promptly<T>(promise: Promise<T>): Promise<T> {
 }
 
 beforeEach(async () => {
+  echo = createServer((socket) => socket.pipe(socket).on('error', () => undefined));
+  await new Promise<void>((resolve) => echo.listen(0, '127.0.0.1', resolve));
+  echoPort = (echo.address() as { port: number }).port;
   root = await realpath(await mkdtemp(join(tmpdir(), 'ddshell-cli-')));
   home = join(root, 'home');
   await mkdir(home);
@@ -146,6 +154,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await server.stop();
+  await new Promise<void>((resolve) => echo.close(() => resolve()));
   await rm(root, { recursive: true, force: true });
 });
 
@@ -746,5 +755,79 @@ describe('ddshell --tty', () => {
     streams.stdin.write('\r~.');
     expect(await promptly(running)).toBe(255);
     expect(streams.err()).toMatch(/disconnected from vm/);
+  });
+});
+
+describe('ddshell forward', () => {
+  /** Starts `forward` and resolves the port it picked once it says it is listening. */
+  async function listening(extra: string[] = ['-L', `0:127.0.0.1:${echoPort}`]) {
+    const streams = io();
+    const running = main(['forward', 'vm', ...extra, '--config', controllerConfig], streams);
+    await waitFor(() => /listening on 127\.0\.0\.1:\d+/.test(streams.err()));
+    const port = Number(/listening on 127\.0\.0\.1:(\d+)/.exec(streams.err())![1]);
+    return { streams, running, port };
+  }
+
+  function roundTrip(port: number, text: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1');
+      let got = '';
+      socket.on('error', reject);
+      socket.on('close', () => reject(new Error('closed')));
+      socket.on('connect', () => socket.write(text));
+      socket.on('data', (data) => {
+        got += data.toString();
+        if (got.length >= text.length) {
+          socket.destroy();
+          resolve(got);
+        }
+      });
+    });
+  }
+
+  it('relays connections through the server to an allowed host, several at once', async () => {
+    const { running, port } = await listening();
+    const answers = await Promise.all([
+      roundTrip(port, 'one'),
+      roundTrip(port, 'two'),
+      roundTrip(port, 'x'.repeat(200_000)),
+    ]);
+    expect(answers[0]).toBe('one');
+    expect(answers[1]).toBe('two');
+    expect(answers[2]).toHaveLength(200_000);
+
+    process.emit('SIGINT');
+    expect(await running).toBe(0);
+  }, 30_000);
+
+  it('closes a connection the server refuses and keeps listening', async () => {
+    const { streams, running, port } = await listening(['-L', '0:127.0.0.1:9']);
+    const closed = new Promise<void>((resolve) => {
+      const socket = connect(port, '127.0.0.1');
+      socket.on('error', () => undefined);
+      socket.on('close', () => resolve());
+    });
+    await closed;
+    expect(streams.err()).toMatch(/127\.0\.0\.1:9: UNAUTHORIZED: .*allowForwards/);
+    expect(await roundTrip(port, 'a').catch(() => 'refused')).toBe('refused');
+
+    process.emit('SIGINT');
+    expect(await running).toBe(0);
+  }, 30_000);
+
+  it('rejects bad -L specs and misuse', async () => {
+    for (const argv of [
+      ['forward', 'vm'],
+      ['forward', 'vm', '-L', 'nope'],
+      ['forward', 'vm', '-L', '80:host'],
+      ['forward', 'vm', '-L', '0:host:0'],
+      ['forward', 'vm', '-L', '99999:host:80'],
+      ['forward', 'vm,other', '-L', '0:host:80'],
+      ['ping', 'vm', '-L', '0:host:80'],
+    ]) {
+      const streams = io();
+      expect(await main([...argv, '--config', controllerConfig], streams)).toBe(255);
+      expect(streams.err()).toMatch(/BAD_REQUEST|-L|forward/);
+    }
   });
 });
