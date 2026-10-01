@@ -33,11 +33,12 @@ import { VERSION } from './version.js';
 
 export { VERSION };
 
-const USAGE = `ddshell ${VERSION}: a line-oriented remote shell over dead-drop. Not SSH, no TTY.
+const USAGE = `ddshell ${VERSION}: a line-oriented remote shell over dead-drop. Not SSH; a terminal only with --tty.
 
 Usage:
   ddshell serve [--config <file>]
   ddshell <target> [--session <name>] [--config <file>] [--timeout <ms>] [--debug]
+  ddshell <target> --tty [--config <file>] [--timeout <ms>] [--debug]
   ddshell exec <target>[,<target>...] [--session <name>] [--config <file>] [--timeout <ms>] [--debug] -- <command...>
   ddshell sessions <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug]
   ddshell jobs <target>[,<target>...] [--config <file>] [--timeout <ms>] [--debug]
@@ -59,6 +60,11 @@ each output line is prefixed with its target and the exit code is the highest.
 running on exit; it closes on \`exit\` or after the server's idle timeout.
 jobs lists your jobs in the server's ledger, newest first, and status shows one by
 its id or a unique prefix of it. Neither shows commands or output.
+--tty runs a shell on a pseudo-terminal, so vim, top and tab completion work. Keys
+travel in batches and the screen comes back by long poll: expect each keystroke to
+echo after a round trip. The server needs node-pty built (python3, make, g++ on
+Linux). Type ~. at the start of a line to disconnect, as in ssh. Leaving closes the
+shell. Exit code: the shell's own; 255 if you disconnect or ddshell fails.
 Exit codes (ping, sessions, jobs, status): 0 every request answered; 1 some did not; 255 ddshell failed.
 Exit codes (put, get, cp): 0 every copy landed and matched its sha256; 1 some did
 not; 255 ddshell failed. Remote relative paths start in the target's home, as in scp.
@@ -99,6 +105,7 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
         timeout: { type: 'string' },
         count: { type: 'string' },
         session: { type: 'string' },
+        tty: { type: 'boolean', default: false },
         debug: { type: 'boolean', default: false },
         recursive: { type: 'boolean', short: 'r', default: false },
         file: { type: 'string', short: 'f' },
@@ -156,6 +163,9 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     if (command === 'keygen') {
       if (target !== undefined) throw usage('keygen takes no positional arguments');
       return await keygen(io, configPath, values);
+    }
+    if (values.tty && (named === false || command === 'exec' || values.session !== undefined)) {
+      throw usage('--tty applies to an interactive shell: ddshell <target> --tty');
     }
     if (command !== 'unit' && (values.account !== undefined || values.template)) {
       throw usage('--account and --template apply to unit only');
@@ -280,6 +290,9 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
       });
     }
     if (target !== undefined) throw usage(`unexpected argument "${target}"`);
+    if (values.tty) {
+      return await terminalShell(io, config, command!, { timeoutMs, debug: values.debug });
+    }
     return await interactive(io, config, command!, {
       timeoutMs,
       debug: values.debug,
@@ -1026,6 +1039,76 @@ async function interactive(
     await client.stop();
   }
   return status;
+}
+
+/** What the server accepts as `$TERM`. Anything else is left for the shell's default. */
+const TERM = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * `ddshell <target> --tty`: the terminal goes raw, every key goes to the
+ * remote shell, and its screen comes back untouched. Ctrl-C is a key here, so
+ * `~.` at the start of a line is the way out when the link stalls.
+ */
+async function terminalShell(
+  io: Io,
+  config: Loaded,
+  target: string,
+  { timeoutMs, debug }: { timeoutMs: number; debug: boolean },
+): Promise<number> {
+  const note = (message: string) => io.stderr.write(`[ddshell] ${message}\n`);
+  const stdin = io.stdin as Io['stdin'] & { setRawMode?: (mode: boolean) => unknown };
+  const screen = io.stdout as NodeJS.WritableStream & { columns?: number; rows?: number };
+  if (stdin.isTTY !== true) throw usage('--tty needs a terminal on stdin');
+  const size = () => ({ cols: screen.columns || 80, rows: screen.rows || 24 });
+  const peer = resolveTarget(config.shell, target);
+  const client = await ShellClient.start({ ...config, debug, onNewHost: pinned(io) });
+  const leave = new AbortController();
+  let tty: Awaited<ReturnType<ShellClient['tty']>> | undefined;
+  let disconnected = false;
+  let lineStart = true;
+  let tilde = false;
+  const onKeys = (chunk: Buffer | string) => {
+    const bytes = Buffer.from(chunk);
+    for (const byte of bytes) {
+      if (tilde && byte === 0x2e) disconnected = true;
+      tilde = lineStart && byte === 0x7e;
+      lineStart = byte === 0x0d || byte === 0x0a;
+    }
+    if (disconnected) leave.abort();
+    else tty?.type(bytes);
+  };
+  const onResize = () => tty?.resize(size());
+  try {
+    const term = io.env.TERM;
+    tty = await client.tty(peer, size(), {
+      timeoutMs,
+      ...(term !== undefined && TERM.test(term) ? { term } : {}),
+    });
+    stdin.setRawMode?.(true);
+    stdin.on('data', onKeys);
+    stdin.on('end', () => leave.abort());
+    screen.on('resize', onResize);
+    const exit = await tty.attach({
+      timeoutMs,
+      signal: leave.signal,
+      onOutput: (bytes) => io.stdout.write(bytes),
+      onDropped: (bytes) =>
+        note(`${bytes} bytes of screen output dropped: the server keeps outputCapBytes`),
+    });
+    if (exit === undefined) {
+      note(disconnected ? `disconnected from ${target}` : `input closed; left ${target}`);
+      return 255;
+    }
+    if (exit.exitCode !== null) return exit.exitCode;
+    return exit.signal === null ? 255 : 128 + exit.signal;
+  } finally {
+    stdin.off('data', onKeys);
+    screen.off('resize', onResize);
+    stdin.setRawMode?.(false);
+    stdin.pause();
+    await tty?.close().catch(() => undefined);
+    await client.stop();
+  }
 }
 
 /** Runs one command and prints its output. `undefined` means no answer arrived. */

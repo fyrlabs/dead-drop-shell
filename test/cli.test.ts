@@ -22,6 +22,7 @@ import { VERSION, main, type Io } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { formatPublicKey, readKeyPair } from '../src/keys.js';
 import { keyLines, waitFor } from './helpers.js';
+import { loadPty } from '../src/tty.js';
 
 let root: string;
 let home: string;
@@ -670,5 +671,79 @@ describe('ddshell unit', () => {
     const streams = io();
     expect(await main(argv, streams)).toBe(255);
     expect(streams.err()).toMatch(/BAD_REQUEST/);
+  });
+});
+
+/** node-pty is optional: on a machine where it did not build, there is no terminal to run. */
+const ptyBuilt = (() => {
+  try {
+    loadPty();
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+describe('ddshell --tty', () => {
+  function screen() {
+    const streams = terminalIo();
+    const out = streams.stdout as PassThrough & { columns: number; rows: number };
+    out.columns = 100;
+    out.rows = 30;
+    return { streams, out };
+  }
+
+  it('refuses without a terminal on stdin, and on commands that are not a shell', async () => {
+    const piped = io();
+    expect(await main(['vm', '--tty', '--config', controllerConfig], piped)).toBe(255);
+    expect(piped.err()).toMatch(/needs a terminal on stdin/);
+
+    for (const argv of [
+      ['ping', 'vm', '--tty'],
+      ['exec', 'vm', '--tty', '--', 'true'],
+      ['vm', '--tty', '--session', 'build'],
+    ]) {
+      const streams = io();
+      expect(await main([...argv, '--config', controllerConfig], streams)).toBe(255);
+      expect(streams.err()).toMatch(/--tty applies to an interactive shell/);
+    }
+  });
+
+  it.skipIf(!ptyBuilt)(
+    'runs a shell on a pty: sizes it, follows a resize, and exits with its code',
+    async () => {
+      const { streams, out } = screen();
+      const running = main(['vm', '--tty', '--config', controllerConfig], streams);
+
+      streams.stdin.write('stty size\n');
+      await waitFor(() => streams.out().includes('30 100'), 10_000);
+
+      out.columns = 50;
+      out.rows = 10;
+      out.emit('resize');
+      // Split quotes, so the echoed keys never match the output checked for.
+      streams.stdin.write('stty size; echo do""ne\n');
+      await waitFor(() => streams.out().includes('10 50'), 10_000);
+
+      // Ctrl-C is a key here: the remote shell gets it, ddshell does not leave.
+      streams.stdin.write('sleep 30\u0003');
+      streams.stdin.write('echo still""here\n');
+      await waitFor(() => streams.out().includes('stillhere'), 10_000);
+
+      streams.stdin.write('exit 3\n');
+      expect(await promptly(running)).toBe(3);
+    },
+    30_000,
+  );
+
+  it.skipIf(!ptyBuilt)('~. at the start of a line disconnects and closes the shell', async () => {
+    const { streams } = screen();
+    const running = main(['vm', '--tty', '--config', controllerConfig], streams);
+    streams.stdin.write('echo up""\n');
+    await waitFor(() => streams.out().includes('up'), 10_000);
+
+    streams.stdin.write('\r~.');
+    expect(await promptly(running)).toBe(255);
+    expect(streams.err()).toMatch(/disconnected from vm/);
   });
 });

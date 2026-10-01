@@ -41,6 +41,7 @@ import {
   namedSessionId,
 } from './protocol.js';
 import { destination, hashFile, makeTree, temporaryPath, walk } from './transfer.js';
+import { RemoteTty, transient, type TtySize } from './tty-client.js';
 
 export interface ClientOptions {
   runtime: RuntimeConfig;
@@ -256,6 +257,33 @@ export class ShellClient {
    */
   session(peer: string, name?: string): RemoteSession {
     return new RemoteSession(this.call, peer, name);
+  }
+
+  /**
+   * Starts a shell on a pseudo-terminal on `peer`. UNSUPPORTED when the server
+   * is older than terminal mode, or has no node-pty built.
+   */
+  async tty(
+    peer: string,
+    size: TtySize,
+    options: { term?: string; timeoutMs: number; signal?: AbortSignal },
+  ): Promise<RemoteTty> {
+    const { term, ...call } = options;
+    try {
+      return await RemoteTty.open(this.call, peer, randomUUID(), size, term, call);
+    } catch (error) {
+      if (
+        DeadDropError.is(error) &&
+        error.code === 'BAD_REQUEST' &&
+        /sessionId|unknown shell operation/.test(error.message)
+      ) {
+        throw new DeadDropError(
+          'UNSUPPORTED',
+          `${peer} runs a ddshell without terminal mode; upgrade it to use --tty`,
+        );
+      }
+      throw error;
+    }
   }
 
   /** The caller's live sessions on `peer`. */
@@ -619,10 +647,7 @@ export class RemoteSession {
         failures = 0;
       } catch (error) {
         failures += 1;
-        const transient =
-          DeadDropError.is(error) &&
-          (error.retryable || error.code === 'TIMEOUT' || error.code === 'RATE_LIMITED');
-        if (!transient || failures >= POLL_ATTEMPTS || options.signal?.aborted) throw error;
+        if (!transient(error) || failures >= POLL_ATTEMPTS || options.signal?.aborted) throw error;
         await sleep(1000 * failures);
       }
     }

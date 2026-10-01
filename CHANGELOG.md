@@ -12,6 +12,7 @@
 - Output streams while a command runs, so long commands no longer hit `--timeout` and no longer tie up the server.
 - Ctrl-C cancels the remote command, in interactive sessions and in `ddshell exec`, and keeps your session and its cwd. Press it twice to leave without waiting.
 - In bash, `declare` inside a command now needs `-g` to keep the variable for later commands.
+- `ddshell <target> --tty` opens a real terminal, so vim, top and tab completion work. Keys travel in batches and the screen comes back by long poll, so each keystroke echoes after a round trip. Type `~.` at the start of a line to disconnect. The server needs `node-pty`, which compiles on Linux (python3, make, g++); without it line mode is unaffected.
 - `examples/ddshell-server@.service` runs one server per person, each as their own account with their own repository and secret. See `docs/per-person.md`.
 - `ddshell unit` prints a systemd unit that runs the server by absolute paths, so it works with nvm or a user npm prefix. `--template` prints the per-person one.
 - Each controller is held to 16 live sessions and 600 requests a minute by default (`shell.maxSessions`, `shell.requestsPerMinute`). A refused command is not run.

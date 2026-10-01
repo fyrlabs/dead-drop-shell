@@ -800,6 +800,21 @@ describe.skipIf(!ptyBuilt)('terminal', () => {
     await server.stop();
   });
 
+  it('reports a server without terminal mode as unsupported', async () => {
+    const old = new DeadDropRuntime({ config: runtimeConfig('old') });
+    await old.start();
+    cleanup.push(() => old.stop());
+    old.defaultWorkspace().service('shell', {
+      v1: () => {
+        throw new DeadDropError('BAD_REQUEST', 'sessionId must be a UUID');
+      },
+    });
+    const client = await startClient('laptop', { v1: true });
+    await expect(
+      client.tty('old', { cols: 80, rows: 24 }, { timeoutMs: 10_000 }),
+    ).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+  });
+
   it('logs opening and closing a terminal, never what was typed or shown', async () => {
     const server = await startServer();
     const tty = terminal(await startClient());
