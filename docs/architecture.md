@@ -90,6 +90,12 @@ Output is split from the trailer by a scanner that holds back just enough bytes 
 
 A command past `commandTimeoutMs`, a server shutdown, or an idle timeout kills the whole process group, background jobs included. A session never outlives the server process that owns it.
 
+## Terminal
+
+`ddshell <target> --tty` is separate from sessions and the ledger. `tty-open` starts a shell on a pty (node-pty, loaded lazily because it is an optional dependency) and registers it under the caller's identity and a client-chosen id; opening the same id again returns the running one. `tty-io` types, resizes and reads in one request. The screen goes through an `OutputBuffer` read by offset, as a streamed job's output does, with a 10 s cap on how long an answer waits. Keystrokes are numbered: `input` carries `inputOffset`, the server skips bytes it already applied and refuses a gap, so a request delivered twice, or resent after a timeout, types nothing twice. The client runs a reader loop (long poll) and a writer loop (50 ms batches), so a key never waits behind a poll; the writer's requests ask from an offset no screen reaches, so they carry no output.
+
+A terminal counts toward `maxSessions`, is closed by the idle sweep, and is never in the ledger: a restart ends it and `tty-io` on a lost id answers `session_lost` without typing. The audit log records open and close only, never keys or screen bytes. node-pty has no Linux prebuilds, so a server needs a compiler; without it a tty request answers UNSUPPORTED and `ddshell check` warns. The loader sets the execute bit on `spawn-helper`, which the 1.1.0 tarball ships without it.
+
 ## Ledger
 
 `<ledgerDir>/<jobId>.json`, mode 0600 in a 0700 directory, written to a temporary file, flushed, then renamed. Job ids must be UUIDs because they become file names. Records hold the result for replay but never the command text. At startup every `running` record becomes `unknown`. Finished records are pruned after `ledgerRetentionMs`.
@@ -98,4 +104,4 @@ The ledger stores command output for the retention window. That is the price of 
 
 ## What is deliberately missing
 
-No PTY, or reconnecting to a session after a server restart. These are phase four in the parent project's [application extension proposal](https://github.com/fyrlabs/dead-drop/blob/main/docs/proposals/0001-application-extensions.md). There is also no generic plugin host here; [upstream-requirements.md](upstream-requirements.md) records what one would need.
+No reconnecting to a session or a terminal after a server restart, and no reattaching to a terminal after leaving it. No local echo prediction in `--tty`. These are phase four in the parent project's [application extension proposal](https://github.com/fyrlabs/dead-drop/blob/main/docs/proposals/0001-application-extensions.md). There is also no generic plugin host here; [upstream-requirements.md](upstream-requirements.md) records what one would need.

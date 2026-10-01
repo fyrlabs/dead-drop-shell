@@ -8,6 +8,7 @@ import { ShellClient } from './client.js';
 import { loadConfig, resolvePath } from './config.js';
 import { KnownHosts, parsePublicKey, readKeyPair } from './keys.js';
 import { SHELL_CHANNEL } from './protocol.js';
+import { loadPty } from './tty.js';
 
 export interface Finding {
   level: 'ok' | 'warn' | 'fail';
@@ -74,6 +75,13 @@ export async function check(path: string, debug = false): Promise<Finding[]> {
       () => add('ok', 'server', `shell ${shell} is executable`),
       () => add('fail', 'server', `shell ${shell} is missing or not executable`),
     );
+    // Optional: only `--tty` needs it, so a missing build is a warning.
+    try {
+      loadPty();
+      add('ok', 'server', 'terminal mode (--tty) is available: node-pty loads');
+    } catch (error) {
+      add('warn', 'server', `${describe(error)}; line mode is unaffected`);
+    }
     const ledger = await writableAncestor(config.shell.ledgerDir);
     if (ledger.ok) add('ok', 'server', `ledger ${config.shell.ledgerDir} can be written`);
     else add('fail', 'server', `ledger ${config.shell.ledgerDir}: ${ledger.reason}`);
