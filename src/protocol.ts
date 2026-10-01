@@ -178,6 +178,49 @@ export interface ListRequest {
   path: string;
 }
 
+/**
+ * Starts a shell on a pseudo-terminal. Asking again with the same `ttyId`
+ * returns the one already running, so a retried open starts nothing twice.
+ * An older server answers BAD_REQUEST, which the client reports as unsupported.
+ */
+export interface TtyOpenRequest {
+  v: 1;
+  op: 'tty-open';
+  /** Chosen by the client. Scoped to the caller's identity on the server. */
+  ttyId: string;
+  cols: number;
+  rows: number;
+  /** The client's `$TERM`. */
+  term?: string;
+}
+
+/**
+ * Types, resizes and reads the screen in one request. `input` starts at byte
+ * `inputOffset` of everything the client has typed, and the server skips what
+ * it already applied, so a delivered-twice request types nothing twice.
+ * `offset` and `waitMs` work as in `OutputRequest`.
+ */
+export interface TtyIoRequest {
+  v: 1;
+  op: 'tty-io';
+  ttyId: string;
+  /** Base64. */
+  input?: string;
+  inputOffset: number;
+  cols?: number;
+  rows?: number;
+  offset: number;
+  waitMs?: number;
+}
+
+export interface TtyCloseRequest {
+  v: 1;
+  op: 'tty-close';
+  ttyId: string;
+}
+
+export type TtyRequest = TtyOpenRequest | TtyIoRequest | TtyCloseRequest;
+
 export type TransferRequest =
   | PutOpenRequest
   | PutChunkRequest
@@ -197,7 +240,8 @@ export type ShellRequest =
   | JobRequest
   | TransferRequest
   | MkdirRequest
-  | ListRequest;
+  | ListRequest
+  | TtyRequest;
 
 export interface JobResult {
   jobId: string;
@@ -387,6 +431,85 @@ export interface TransferCloseResult {
 export type TransferResponse =
   TransferOpened | PutChunkResult | GetChunkResult | TransferCloseResult | ListResult | MkdirResult;
 
+export interface TtyOpened {
+  ttyId: string;
+  /** The server account's home, so the client can show where the shell starts. */
+  home: string;
+}
+
+/** Screen bytes from `offset`, as for `JobOutput`. All of them are on the terminal, so no `fd`. */
+export interface TtyOutput {
+  ttyId: string;
+  state: 'running' | 'exited';
+  offset: number;
+  frames: OutputFrame[];
+  next: number;
+  end: number;
+  /** Input bytes the server has applied. */
+  received: number;
+  /** Set once `state` is `exited`. */
+  exit?: { exitCode: number | null; signal: number | null };
+}
+
+/** The terminal no longer exists: it idled out, was closed, or the server restarted. */
+export interface TtyLost {
+  ttyId: string;
+  state: 'session_lost';
+  message: string;
+}
+
+export interface TtyClosed {
+  closed: boolean;
+}
+
+export type TtyResponse = TtyOpened | TtyOutput | TtyLost | TtyClosed;
+
+/** Terminals are bounded so a bad size cannot make the server allocate without limit. */
+export const MAX_TTY_DIMENSION = 1000;
+
+const TERM = /^[A-Za-z0-9._-]{1,64}$/;
+
+function dimension(value: unknown, name: string): number {
+  const size = count(value, name);
+  if (size < 1 || size > MAX_TTY_DIMENSION) bad(`${name} must be 1 to ${MAX_TTY_DIMENSION}`);
+  return size;
+}
+
+function parseTty(source: Record<string, unknown>): TtyRequest {
+  if (!isJobId(source.ttyId)) bad('ttyId must be a UUID');
+  const ttyId = source.ttyId;
+  if (source.op === 'tty-close') return { v: 1, op: 'tty-close', ttyId };
+  if (source.op === 'tty-open') {
+    if (source.term !== undefined && (typeof source.term !== 'string' || !TERM.test(source.term))) {
+      bad('term must be 1 to 64 letters, digits, ".", "_" or "-"');
+    }
+    return {
+      v: 1,
+      op: 'tty-open',
+      ttyId,
+      cols: dimension(source.cols, 'cols'),
+      rows: dimension(source.rows, 'rows'),
+      ...(source.term === undefined ? {} : { term: source.term as string }),
+    };
+  }
+  if (source.input !== undefined && typeof source.input !== 'string') bad('input must be base64');
+  if ((source.cols === undefined) !== (source.rows === undefined)) {
+    bad('cols and rows go together');
+  }
+  return {
+    v: 1,
+    op: 'tty-io',
+    ttyId,
+    inputOffset: count(source.inputOffset, 'inputOffset'),
+    offset: count(source.offset, 'offset'),
+    ...(source.input === undefined ? {} : { input: source.input }),
+    ...(source.cols === undefined
+      ? {}
+      : { cols: dimension(source.cols, 'cols'), rows: dimension(source.rows, 'rows') }),
+    ...(source.waitMs === undefined ? {} : { waitMs: count(source.waitMs, 'waitMs') }),
+  };
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** Job and session ids become file names on the server, so only UUIDs are accepted. */
@@ -432,6 +555,9 @@ export function parseRequest(raw: unknown): ShellRequest {
   if (typeof source.op === 'string' && TRANSFER_OPS.has(source.op)) return parseTransfer(source);
   if (source.op === 'list') return { v: 1, op: 'list', path: path(source.path, 'path') };
   if (source.op === 'mkdir') return parseMkdir(source);
+  if (source.op === 'tty-open' || source.op === 'tty-io' || source.op === 'tty-close') {
+    return parseTty(source);
+  }
   if (source.op === 'output' || source.op === 'cancel') {
     if (!isJobId(source.jobId)) bad('jobId must be a UUID');
     if (source.op === 'cancel') return { v: 1, op: 'cancel', jobId: source.jobId };

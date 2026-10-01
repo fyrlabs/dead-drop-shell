@@ -38,9 +38,16 @@ import {
   type SessionsResult,
   type TransferRequest,
   type TransferResponse,
+  type TtyClosed,
+  type TtyIoRequest,
+  type TtyLost,
+  type TtyOpened,
+  type TtyOpenRequest,
+  type TtyOutput,
 } from './protocol.js';
 import { ShellSession } from './session.js';
 import { ServerTransfers } from './transfer.js';
+import { TtySession } from './tty.js';
 import { DEAD_DROP_VERSION, VERSION } from './version.js';
 
 export interface ServerOptions {
@@ -88,6 +95,8 @@ export class ShellServer {
   readonly runtime: DeadDropRuntime;
   private readonly workspace: Workspace;
   private readonly sessions = new Map<string, Entry>();
+  /** Terminals, keyed like `sessions`. Never in the ledger: a restart ends them and nothing reruns. */
+  private readonly ttys = new Map<string, TtyEntry>();
   private readonly inflight = new Map<
     string,
     { identity: string; result: Promise<ExecResponse> }
@@ -226,8 +235,10 @@ export class ShellServer {
     this.stopping = true;
     clearInterval(this.sweeper);
     await Promise.all([...this.sessions.values()].map(({ session }) => session.close()));
+    await Promise.all([...this.ttys.values()].map(({ session }) => session.close()));
     await this.transfers.closeAll();
     this.sessions.clear();
+    this.ttys.clear();
     await this.runtime.stop();
     await this.audit.flush();
   }
@@ -328,6 +339,9 @@ export class ShellServer {
     if (request.op === 'job') return this.job(identity, request.jobId);
     if (request.op === 'output') return this.output(identity, request);
     if (request.op === 'cancel') return this.cancel(identity, request.jobId);
+    if (request.op === 'tty-open') return this.ttyOpen(identity, request);
+    if (request.op === 'tty-io') return this.ttyIo(identity, request);
+    if (request.op === 'tty-close') return this.ttyClose(identity, request.ttyId);
     if (request.op === 'list') return this.transfers.list(request.path);
     if (request.op === 'mkdir') return this.transfers.mkdir(request);
     if (request.op !== 'exec' && request.op !== 'close') {
@@ -491,7 +505,7 @@ export class ShellServer {
         };
       }
       const { maxSessions } = this.options.shell;
-      if (this.live(identity).length >= maxSessions) {
+      if (this.openCount(identity) >= maxSessions) {
         this.record({
           event: 'refused',
           controller: identity,
@@ -658,6 +672,94 @@ export class ShellServer {
     );
   }
 
+  /** Terminals count toward `maxSessions` with shell sessions; an exited one holds nothing. */
+  private openCount(identity: string): number {
+    const ttys = [...this.ttys.values()].filter(
+      (entry) => entry.identity === identity && !entry.session.exit,
+    );
+    return this.live(identity).length + ttys.length;
+  }
+
+  /** Opening a terminal that is already open answers the same, so a retry starts nothing twice. */
+  private ttyOpen(identity: string, request: TtyOpenRequest): TtyOpened {
+    const { ttyId } = request;
+    const key = sessionKey(identity, ttyId);
+    const existing = this.ttys.get(key);
+    if (existing) {
+      existing.session.lastUsed = performance.now();
+      return { ttyId, home: this.home };
+    }
+    const { maxSessions } = this.options.shell;
+    if (this.openCount(identity) >= maxSessions) {
+      this.record({
+        event: 'refused',
+        controller: identity,
+        code: 'RATE_LIMITED',
+        reason: 'maxSessions',
+      });
+      throw new DeadDropError(
+        'RATE_LIMITED',
+        `this controller already has ${maxSessions} open sessions (shell.maxSessions); close one, or let one reach the idle timeout, and try again`,
+        { retryable: false },
+      );
+    }
+    const session = new TtySession({
+      shell: this.options.shell.shell,
+      cwd: this.home,
+      env: this.env,
+      term: request.term ?? 'xterm-256color',
+      cols: request.cols,
+      rows: request.rows,
+      outputCapBytes: this.options.shell.outputCapBytes,
+    });
+    this.ttys.set(key, { identity, ttyId, session });
+    this.runtime.logger.info('terminal opened', { identity, ttyId, pid: session.pid });
+    this.record({ event: 'tty-open', controller: identity, ttyId });
+    return { ttyId, home: this.home };
+  }
+
+  /** Types what the client sent, then answers with the screen from its offset, waiting for more if there is none. */
+  private async ttyIo(identity: string, request: TtyIoRequest): Promise<TtyOutput | TtyLost> {
+    const { ttyId, offset } = request;
+    const entry = this.ttys.get(sessionKey(identity, ttyId));
+    if (!entry) {
+      return {
+        ttyId,
+        state: 'session_lost',
+        message:
+          'this terminal no longer exists on the server (idle timeout, exit, or server restart); nothing was typed',
+      };
+    }
+    const { session } = entry;
+    session.lastUsed = performance.now();
+    if (request.input !== undefined) {
+      session.write(request.inputOffset, Buffer.from(request.input, 'base64'));
+    }
+    if (request.cols !== undefined && request.rows !== undefined) {
+      session.resize(request.cols, request.rows);
+    }
+    const wait = Math.min(request.waitMs ?? 0, MAX_WAIT_MS);
+    await session.buffer.waitFor(offset, wait);
+    if (wait > 0 && !session.exit && session.buffer.end > offset) await sleep(LINGER_MS);
+    session.lastUsed = performance.now();
+    return {
+      ttyId,
+      state: session.exit ? 'exited' : 'running',
+      ...session.buffer.read(offset),
+      received: session.received,
+      ...(session.exit ? { exit: session.exit } : {}),
+    };
+  }
+
+  private async ttyClose(identity: string, ttyId: string): Promise<TtyClosed> {
+    const key = sessionKey(identity, ttyId);
+    const entry = this.ttys.get(key);
+    this.ttys.delete(key);
+    await entry?.session.close();
+    if (entry) this.record({ event: 'tty-close', controller: identity, ttyId });
+    return { closed: entry !== undefined };
+  }
+
   /** Adds the key's comment, so a person reading the log need not look fingerprints up. */
   private record(event: AuditEvent): void {
     const name = event.controller.startsWith('key:')
@@ -710,6 +812,13 @@ export class ShellServer {
       await session.close();
       this.record({ event: 'session-close', controller: identity, sessionId });
     }
+    for (const [key, { identity, ttyId, session }] of this.ttys) {
+      if (now - session.lastUsed < this.options.shell.idleTimeoutMs) continue;
+      this.ttys.delete(key);
+      this.runtime.logger.info('terminal closed after idle timeout', { pid: session.pid });
+      await session.close();
+      this.record({ event: 'tty-close', controller: identity, ttyId });
+    }
     this.limiter.sweep();
     await this.transfers.sweep();
     await this.guard.compact().catch((error: unknown) => {
@@ -730,7 +839,11 @@ type Answer =
   | SessionsResult
   | JobsResult
   | JobStatus
-  | TransferResponse;
+  | TransferResponse
+  | TtyOpened
+  | TtyOutput
+  | TtyLost
+  | TtyClosed;
 
 interface Stream {
   jobId: string;
@@ -768,6 +881,12 @@ interface Entry {
   sessionId: string;
   name?: string;
   session: ShellSession;
+}
+
+interface TtyEntry {
+  identity: string;
+  ttyId: string;
+  session: TtySession;
 }
 
 function sessionKey(identity: string, sessionId: string): string {

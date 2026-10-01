@@ -16,7 +16,17 @@ import { ShellClient, type RemoteSession } from '../src/client.js';
 import { parseShellConfig, type ShellConfig } from '../src/config.js';
 import { formatPublicKey, parsePublicKey, readKeyPair } from '../src/keys.js';
 import { JobLedger } from '../src/ledger.js';
-import { isJobId, namedSessionId, type ExecResponse, type JobResult } from '../src/protocol.js';
+import { loadPty } from '../src/tty.js';
+import {
+  isJobId,
+  namedSessionId,
+  type ExecResponse,
+  type JobResult,
+  type ShellRequest,
+  type TtyLost,
+  type TtyOpened,
+  type TtyOutput,
+} from '../src/protocol.js';
 import { isAlive, keyLines, waitFor } from './helpers.js';
 
 let root: string;
@@ -660,5 +670,151 @@ describe('job listing', () => {
     await expect(client.job('old', randomUUID(), { timeoutMs: 10_000 })).rejects.toMatchObject({
       code: 'UNSUPPORTED',
     });
+  });
+});
+
+/** node-pty is optional: on a machine where it did not build, these tests have nothing to run. */
+const ptyBuilt = (() => {
+  try {
+    loadPty();
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+describe.skipIf(!ptyBuilt)('terminal', () => {
+  /** A caller's view of one terminal: what it typed, and the screen so far. */
+  function terminal(client: ShellClient, ttyId = randomUUID()) {
+    const call = <Result>(request: ShellRequest) =>
+      client.call<Result>('vm', request, { timeoutMs: 10_000 });
+    let sent = 0;
+    let offset = 0;
+    let screen = '';
+    const io = async (fields: { input?: string; cols?: number; rows?: number } = {}) => {
+      const request: ShellRequest = {
+        v: 1,
+        op: 'tty-io',
+        ttyId,
+        inputOffset: sent,
+        offset,
+        waitMs: 200,
+        ...fields,
+      };
+      const answer = await call<TtyOutput | TtyLost>(request);
+      if (answer.state === 'session_lost') return answer;
+      offset = answer.next;
+      for (const { data } of answer.frames) screen += Buffer.from(data, 'base64').toString();
+      return answer;
+    };
+    return {
+      ttyId,
+      call,
+      open: (cols = 100, rows = 30) => call<TtyOpened>({ v: 1, op: 'tty-open', ttyId, cols, rows }),
+      io,
+      screen: () => screen,
+      /**
+       * Types `text`, delivering the same request `deliveries` times as a
+       * retry would, then reads until `until` shows on the screen.
+       */
+      async type(
+        text: string,
+        until: RegExp,
+        fields: { cols?: number; rows?: number; deliveries?: number } = {},
+      ) {
+        const { deliveries = 1, ...size } = fields;
+        const input = Buffer.from(text).toString('base64');
+        for (let delivery = 0; delivery < deliveries; delivery++) await io({ input, ...size });
+        sent += Buffer.byteLength(text);
+        await waitForScreen(until);
+      },
+    };
+    async function waitForScreen(until: RegExp) {
+      const deadline = Date.now() + 10_000;
+      while (!until.test(screen)) {
+        if (Date.now() > deadline) throw new Error(`never saw ${String(until)} in ${screen}`);
+        await io();
+      }
+    }
+  }
+
+  it('runs a shell on a pty, types each byte once, resizes, and reports the exit', async () => {
+    await startServer();
+    const tty = terminal(await startClient());
+    await tty.open(100, 30);
+    await tty.type('stty size\n', /30 100/);
+
+    // The same request delivered twice must not type twice.
+    await tty.type('echo $((20+22))\n', /^42\r?$/m, { deliveries: 2 });
+    await tty.io();
+    expect(tty.screen().match(/^42\r?$/gm)).toHaveLength(1);
+
+    await expect(
+      tty.call({
+        v: 1,
+        op: 'tty-io',
+        ttyId: tty.ttyId,
+        input: Buffer.from('x').toString('base64'),
+        inputOffset: 9999,
+        offset: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+
+    await tty.type('stty size\n', /10 50/, { cols: 50, rows: 10 });
+    await tty.type('exit 3\n', /exit 3/);
+    let last = await tty.io();
+    for (let tries = 0; last.state === 'running' && tries < 50; tries++) last = await tty.io();
+    expect(last).toMatchObject({ state: 'exited', exit: { exitCode: 3 } });
+  });
+
+  it('keeps terminals to their owner and counts them toward maxSessions', async () => {
+    await startServer({ allowControllers: ['laptop', 'ops'], maxSessions: 1 });
+    const mine = terminal(await startClient());
+    await mine.open();
+    await mine.open();
+    await expect(terminal(await startClient()).open()).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+    });
+
+    const theirs = terminal(await startClient('ops'), mine.ttyId);
+    expect(await theirs.io()).toMatchObject({ state: 'session_lost' });
+    expect(await mine.io()).toMatchObject({ state: 'running' });
+
+    expect(await mine.call({ v: 1, op: 'tty-close', ttyId: mine.ttyId })).toEqual({ closed: true });
+    expect(await mine.io()).toMatchObject({ state: 'session_lost' });
+    expect(await mine.call({ v: 1, op: 'tty-close', ttyId: mine.ttyId })).toEqual({
+      closed: false,
+    });
+  });
+
+  it('closes an idle terminal and kills its shell', async () => {
+    const server = await startServer({ idleTimeoutMs: 200 });
+    const tty = terminal(await startClient());
+    await tty.open();
+    await tty.type('echo $$\n', /^\d+\r?$/m);
+    const pid = Number(/^(\d+)\r?$/m.exec(tty.screen())![1]);
+    expect(isAlive(pid)).toBe(true);
+
+    await waitFor(() => !isAlive(pid), 5000);
+    expect(await tty.io()).toMatchObject({ state: 'session_lost' });
+    await server.stop();
+  });
+
+  it('logs opening and closing a terminal, never what was typed or shown', async () => {
+    const server = await startServer();
+    const tty = terminal(await startClient());
+    await tty.open();
+    await tty.type('echo top-secret-keys\n', /^top-secret-keys\r?$/m);
+    await tty.call({ v: 1, op: 'tty-close', ttyId: tty.ttyId });
+
+    await server.stop();
+    const text = await readFile(join(root, 'vm-state', 'ddshell-audit.log'), 'utf8');
+    expect(text).not.toMatch(/top-secret|echo/);
+    expect(
+      text
+        .trim()
+        .split('\n')
+        .map((line) => (JSON.parse(line) as { event: string }).event),
+    ).toEqual(['tty-open', 'tty-close']);
   });
 });

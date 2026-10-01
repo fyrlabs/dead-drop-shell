@@ -7,6 +7,7 @@ import { dirname } from 'node:path';
  */
 export type AuditEvent =
   | { event: 'session-open' | 'session-close'; controller: string; sessionId: string }
+  | { event: 'tty-open' | 'tty-close'; controller: string; ttyId: string }
   | {
       event: 'exec';
       controller: string;
