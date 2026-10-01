@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createServer, type Server, type Socket } from 'node:net';
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,6 +24,9 @@ import {
   type ExecResponse,
   type JobResult,
   type ShellRequest,
+  type TcpLost,
+  type TcpOpened,
+  type TcpOutput,
   type TtyLost,
   type TtyOpened,
   type TtyOutput,
@@ -831,5 +835,136 @@ describe.skipIf(!ptyBuilt)('terminal', () => {
         .split('\n')
         .map((line) => (JSON.parse(line) as { event: string }).event),
     ).toEqual(['tty-open', 'tty-close']);
+  });
+});
+
+describe('port forwarding', () => {
+  /** A local TCP service: echoes what it gets, and counts connections and the bytes it saw. */
+  async function service() {
+    const sockets: Socket[] = [];
+    let connections = 0;
+    let seen = '';
+    const server: Server = createServer((socket) => {
+      connections += 1;
+      sockets.push(socket);
+      socket.on('data', (data) => {
+        seen += data.toString();
+        socket.write(data);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    cleanup.push(
+      () =>
+        new Promise<void>((resolve) => {
+          for (const socket of sockets) socket.destroy();
+          server.close(() => resolve());
+        }),
+    );
+    const { port } = server.address() as { port: number };
+    return {
+      port,
+      target: `127.0.0.1:${port}`,
+      connections: () => connections,
+      seen: () => seen,
+      hangUp: () => sockets.forEach((socket) => socket.end()),
+    };
+  }
+
+  function forward(client: ShellClient, port: number, streamId = randomUUID()) {
+    const call = <Result>(request: ShellRequest) =>
+      client.call<Result>('vm', request, { timeoutMs: 10_000 });
+    let offset = 0;
+    let got = '';
+    return {
+      streamId,
+      call,
+      open: () => call<TcpOpened>({ v: 1, op: 'tcp-open', streamId, host: '127.0.0.1', port }),
+      io: async (input?: string, inputOffset = 0) => {
+        const answer = await call<TcpOutput | TcpLost>({
+          v: 1,
+          op: 'tcp-io',
+          streamId,
+          inputOffset,
+          offset,
+          waitMs: 200,
+          ...(input === undefined ? {} : { input: Buffer.from(input).toString('base64') }),
+        });
+        if (answer.state === 'session_lost') return answer;
+        offset = answer.next;
+        for (const { data } of answer.frames) got += Buffer.from(data, 'base64').toString();
+        return answer;
+      },
+      got: () => got,
+    };
+  }
+
+  it('relays bytes to an allowed host once each, and closes the connection', async () => {
+    const echo = await service();
+    await startServer({ allowForwards: [echo.target] });
+    const stream = forward(await startClient(), echo.port);
+    await stream.open();
+    await stream.open();
+    expect(echo.connections()).toBe(1);
+
+    // The same request delivered twice must not send twice.
+    await stream.io('hello', 0);
+    await stream.io('hello', 0);
+    for (let tries = 0; tries < 20 && stream.got() !== 'hello'; tries++) await stream.io();
+    expect(stream.got()).toBe('hello');
+    expect(echo.seen()).toBe('hello');
+
+    await expect(stream.io('x', 99)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(await stream.call({ v: 1, op: 'tcp-close', streamId: stream.streamId })).toEqual({
+      closed: true,
+    });
+    expect(await stream.io()).toMatchObject({ state: 'session_lost' });
+  });
+
+  it('refuses hosts that are not allowed before connecting, and reports a refused connection', async () => {
+    const hidden = await service();
+    const open = await service();
+    await startServer({ allowForwards: [open.target, '127.0.0.1:9'] });
+    const client = await startClient();
+
+    await expect(forward(client, hidden.port).open()).rejects.toMatchObject({
+      code: 'UNAUTHORIZED',
+    });
+    expect(hidden.connections()).toBe(0);
+    await expect(forward(client, 9).open()).rejects.toMatchObject({ code: 'SERVICE_ERROR' });
+  });
+
+  it('tells the client when the far end hangs up, and counts toward maxSessions', async () => {
+    const echo = await service();
+    await startServer({ allowForwards: [echo.target], maxSessions: 1 });
+    const client = await startClient();
+    const stream = forward(client, echo.port);
+    await stream.open();
+    await expect(forward(client, echo.port).open()).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+    });
+
+    echo.hangUp();
+    let last = await stream.io();
+    for (let tries = 0; last.state === 'open' && tries < 50; tries++) last = await stream.io();
+    expect(last).toMatchObject({ state: 'closed' });
+  });
+
+  it('logs opening and closing, never the bytes', async () => {
+    const echo = await service();
+    const server = await startServer({ allowForwards: [echo.target] });
+    const stream = forward(await startClient(), echo.port);
+    await stream.open();
+    await stream.io('top-secret-bytes', 0);
+    await stream.call({ v: 1, op: 'tcp-close', streamId: stream.streamId });
+
+    await server.stop();
+    const text = await readFile(join(root, 'vm-state', 'ddshell-audit.log'), 'utf8');
+    expect(text).not.toMatch(/top-secret/);
+    const lines = text
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines.map((line) => line.event)).toEqual(['forward-open', 'forward-close']);
+    expect(lines[0]).toMatchObject({ target: echo.target });
   });
 });

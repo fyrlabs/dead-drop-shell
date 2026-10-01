@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks';
 import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
 import type * as NodePty from 'node-pty';
 
-import { OutputBuffer } from './output.js';
+import { OutputBuffer, freshInput } from './output.js';
 
 const HINT = 'node-pty is not built on this server (it needs python3, make and g++ to install)';
 
@@ -110,13 +110,7 @@ export class TtySession {
    * refused rather than guessed at.
    */
   write(offset: number, bytes: Buffer): void {
-    if (offset > this.received) {
-      throw new DeadDropError(
-        'BAD_REQUEST',
-        `input starts at ${offset} but only ${this.received} bytes have arrived`,
-      );
-    }
-    const fresh = bytes.subarray(this.received - offset);
+    const fresh = freshInput(this.received, offset, bytes);
     if (fresh.length === 0 || this.exit) return;
     this.received += fresh.length;
     this.pty.write(fresh);

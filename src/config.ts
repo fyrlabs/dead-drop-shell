@@ -59,6 +59,8 @@ export interface ShellConfig {
   maxSessions: number;
   /** Server: requests one controller may send per minute, in bursts of up to as many. */
   requestsPerMinute: number;
+  /** Server: `host:port` pairs a controller may forward to. Empty refuses every forward. */
+  allowForwards: string[];
   /** Server: JSON-lines audit file, or `false` for none. */
   auditLog: string | false;
   /** Controller: short target names mapped to server peer ids. */
@@ -123,6 +125,15 @@ export function parseShellConfig(
     fail('shell.authorizedKeys must be an array of public key lines');
   }
   authorizedKeys.forEach((line: string) => parsePublicKey(line));
+  const forwards = source.allowForwards ?? [];
+  if (!Array.isArray(forwards) || !forwards.every((entry) => typeof entry === 'string')) {
+    fail('shell.allowForwards must be an array of "host:port" strings');
+  }
+  const allowForwards = forwards.map((entry: string) => {
+    const parsed = parseForward(entry);
+    if (!parsed) fail(`shell.allowForwards entry "${entry}" is not host:port`);
+    return forwardKey(parsed.host, parsed.port);
+  });
   for (const key of ['allowV1', 'strictHostKeys']) {
     if (source[key] !== undefined && typeof source[key] !== 'boolean')
       fail(`shell.${key} must be true or false`);
@@ -192,6 +203,7 @@ export function parseShellConfig(
     transferChunkBytes,
     maxSessions,
     requestsPerMinute: positive(source, 'requestsPerMinute', 600),
+    allowForwards,
     auditLog:
       source.auditLog === false
         ? false
@@ -200,6 +212,20 @@ export function parseShellConfig(
           : join(runtime.dataDir, 'ddshell-audit.log'),
     targets: targets as Record<string, string>,
   };
+}
+
+/** `host:port` or `[v6]:port`, port 1 to 65535. No wildcards: a forward is allowed by exact name. */
+export function parseForward(spec: string): { host: string; port: number } | undefined {
+  const match = /^(?:\[([0-9A-Fa-f:.]+)\]|([A-Za-z0-9._-]+)):(\d{1,5})$/.exec(spec);
+  if (!match) return undefined;
+  const port = Number(match[3]);
+  if (port < 1 || port > 65535) return undefined;
+  return { host: (match[1] ?? match[2])!, port };
+}
+
+/** What `allowForwards` holds and a request is compared with: host lowercased, no brackets. */
+export function forwardKey(host: string, port: number): string {
+  return `${host.toLowerCase()}:${port}`;
 }
 
 export async function loadConfig(path: string): Promise<LoadedConfig> {

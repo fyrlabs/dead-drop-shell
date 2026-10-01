@@ -57,3 +57,32 @@ describe('terminal requests', () => {
     }
   });
 });
+
+describe('forward requests', () => {
+  const streamId = randomUUID();
+
+  it('parses open, io and close', () => {
+    const open = { v: 1, op: 'tcp-open', streamId, host: 'db.internal', port: 5432 };
+    expect(parseRequest(open)).toEqual(open);
+    const io = { v: 1, op: 'tcp-io', streamId, inputOffset: 2, offset: 0, input: 'YQ==' };
+    expect(parseRequest(io)).toEqual(io);
+    expect(parseRequest({ v: 1, op: 'tcp-close', streamId })).toEqual({
+      v: 1,
+      op: 'tcp-close',
+      streamId,
+    });
+  });
+
+  it('refuses bad ports, hosts and ids', () => {
+    const open = { v: 1, op: 'tcp-open', streamId, host: 'db', port: 80 };
+    for (const bad of [
+      { ...open, port: 0 },
+      { ...open, port: 65536 },
+      { ...open, host: '' },
+      { ...open, host: 'a\0b' },
+      { ...open, streamId: 'x' },
+    ]) {
+      expect(() => parseRequest(bad)).toThrow(expect.objectContaining({ code: 'BAD_REQUEST' }));
+    }
+  });
+});

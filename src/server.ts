@@ -12,7 +12,7 @@ import {
 } from '@fyrlabs/dead-drop/runtime';
 
 import { AuditLog, type AuditEvent } from './audit.js';
-import type { ShellConfig } from './config.js';
+import { forwardKey, type ShellConfig } from './config.js';
 import { answerHello, openRequest, ReplayGuard, sealAnswer } from './envelope.js';
 import { ensureKeyPair, parsePublicKey, type KeyPair, type PublicKey } from './keys.js';
 import { JobLedger, type JobRecord } from './ledger.js';
@@ -38,6 +38,12 @@ import {
   type SessionsResult,
   type TransferRequest,
   type TransferResponse,
+  type TcpClosed,
+  type TcpIoRequest,
+  type TcpLost,
+  type TcpOpened,
+  type TcpOpenRequest,
+  type TcpOutput,
   type TtyClosed,
   type TtyIoRequest,
   type TtyLost,
@@ -48,6 +54,7 @@ import {
 import { ShellSession } from './session.js';
 import { ServerTransfers } from './transfer.js';
 import { TtySession } from './tty.js';
+import { TcpStream } from './forward.js';
 import { DEAD_DROP_VERSION, VERSION } from './version.js';
 
 export interface ServerOptions {
@@ -97,6 +104,8 @@ export class ShellServer {
   private readonly sessions = new Map<string, Entry>();
   /** Terminals, keyed like `sessions`. Never in the ledger: a restart ends them and nothing reruns. */
   private readonly ttys = new Map<string, TtyEntry>();
+  /** TCP forwards, keyed like `sessions`. A `Promise` while connecting, so a duplicate open joins it. */
+  private readonly forwards = new Map<string, ForwardEntry>();
   private readonly inflight = new Map<
     string,
     { identity: string; result: Promise<ExecResponse> }
@@ -236,6 +245,12 @@ export class ShellServer {
     clearInterval(this.sweeper);
     await Promise.all([...this.sessions.values()].map(({ session }) => session.close()));
     await Promise.all([...this.ttys.values()].map(({ session }) => session.close()));
+    for (const { stream } of this.forwards.values())
+      void stream.then(
+        (open) => open.close(),
+        () => undefined,
+      );
+    this.forwards.clear();
     await this.transfers.closeAll();
     this.sessions.clear();
     this.ttys.clear();
@@ -339,6 +354,9 @@ export class ShellServer {
     if (request.op === 'job') return this.job(identity, request.jobId);
     if (request.op === 'output') return this.output(identity, request);
     if (request.op === 'cancel') return this.cancel(identity, request.jobId);
+    if (request.op === 'tcp-open') return this.tcpOpen(identity, request);
+    if (request.op === 'tcp-io') return this.tcpIo(identity, request);
+    if (request.op === 'tcp-close') return this.tcpClose(identity, request.streamId);
     if (request.op === 'tty-open') return this.ttyOpen(identity, request);
     if (request.op === 'tty-io') return this.ttyIo(identity, request);
     if (request.op === 'tty-close') return this.ttyClose(identity, request.ttyId);
@@ -677,7 +695,102 @@ export class ShellServer {
     const ttys = [...this.ttys.values()].filter(
       (entry) => entry.identity === identity && !entry.session.exit,
     );
-    return this.live(identity).length + ttys.length;
+    const forwards = [...this.forwards.values()].filter((entry) => entry.identity === identity);
+    return this.live(identity).length + ttys.length + forwards.length;
+  }
+
+  /** Opens a connection to an allowed `host:port`. Anything else is refused before the network is touched. */
+  private async tcpOpen(identity: string, request: TcpOpenRequest): Promise<TcpOpened> {
+    const { streamId, host, port } = request;
+    const key = sessionKey(identity, streamId);
+    const existing = this.forwards.get(key);
+    if (existing) {
+      await existing.stream;
+      return { streamId };
+    }
+    const target = forwardKey(host, port);
+    if (!this.options.shell.allowForwards.includes(target)) {
+      this.record({
+        event: 'refused',
+        controller: identity,
+        code: 'UNAUTHORIZED',
+        reason: 'allowForwards',
+      });
+      throw new DeadDropError(
+        'UNAUTHORIZED',
+        `${target} is not in this server's shell.allowForwards`,
+        { retryable: false },
+      );
+    }
+    const { maxSessions } = this.options.shell;
+    if (this.openCount(identity) >= maxSessions) {
+      this.record({
+        event: 'refused',
+        controller: identity,
+        code: 'RATE_LIMITED',
+        reason: 'maxSessions',
+      });
+      throw new DeadDropError(
+        'RATE_LIMITED',
+        `this controller already has ${maxSessions} open sessions (shell.maxSessions); close one and try again`,
+        { retryable: false },
+      );
+    }
+    const stream = TcpStream.open(host, port, this.options.shell.outputCapBytes);
+    this.forwards.set(key, { identity, streamId, target, stream });
+    try {
+      await stream;
+    } catch (error) {
+      this.forwards.delete(key);
+      throw error;
+    }
+    this.runtime.logger.info('forward opened', { identity, streamId, target });
+    this.record({ event: 'forward-open', controller: identity, streamId, target });
+    return { streamId };
+  }
+
+  private async tcpIo(identity: string, request: TcpIoRequest): Promise<TcpOutput | TcpLost> {
+    const { streamId, offset } = request;
+    const entry = this.forwards.get(sessionKey(identity, streamId));
+    const stream = await entry?.stream.catch(() => undefined);
+    if (!stream) {
+      return {
+        streamId,
+        state: 'session_lost',
+        message:
+          'this connection no longer exists on the server (idle timeout, close, or server restart); nothing was sent',
+      };
+    }
+    stream.lastUsed = performance.now();
+    if (request.input !== undefined) {
+      stream.write(request.inputOffset, Buffer.from(request.input, 'base64'));
+    }
+    const wait = Math.min(request.waitMs ?? 0, MAX_WAIT_MS);
+    await stream.buffer.waitFor(offset, wait);
+    if (wait > 0 && !stream.closed && stream.buffer.end > offset) await sleep(LINGER_MS);
+    stream.lastUsed = performance.now();
+    return {
+      streamId,
+      state: stream.closed ? 'closed' : 'open',
+      ...stream.buffer.read(offset),
+      received: stream.received,
+      ...(stream.error === undefined ? {} : { error: stream.error }),
+    };
+  }
+
+  private async tcpClose(identity: string, streamId: string): Promise<TcpClosed> {
+    const key = sessionKey(identity, streamId);
+    const entry = this.forwards.get(key);
+    this.forwards.delete(key);
+    if (!entry) return { closed: false };
+    (await entry.stream.catch(() => undefined))?.close();
+    this.record({
+      event: 'forward-close',
+      controller: identity,
+      streamId,
+      target: entry.target,
+    });
+    return { closed: true };
   }
 
   /** Opening a terminal that is already open answers the same, so a retry starts nothing twice. */
@@ -819,6 +932,19 @@ export class ShellServer {
       await session.close();
       this.record({ event: 'tty-close', controller: identity, ttyId });
     }
+    for (const [key, entry] of this.forwards) {
+      const stream = await entry.stream.catch(() => undefined);
+      if (stream && performance.now() - stream.lastUsed < this.options.shell.idleTimeoutMs)
+        continue;
+      this.forwards.delete(key);
+      stream?.close();
+      this.record({
+        event: 'forward-close',
+        controller: entry.identity,
+        streamId: entry.streamId,
+        target: entry.target,
+      });
+    }
     this.limiter.sweep();
     await this.transfers.sweep();
     await this.guard.compact().catch((error: unknown) => {
@@ -843,7 +969,11 @@ type Answer =
   | TtyOpened
   | TtyOutput
   | TtyLost
-  | TtyClosed;
+  | TtyClosed
+  | TcpOpened
+  | TcpOutput
+  | TcpLost
+  | TcpClosed;
 
 interface Stream {
   jobId: string;
@@ -881,6 +1011,14 @@ interface Entry {
   sessionId: string;
   name?: string;
   session: ShellSession;
+}
+
+interface ForwardEntry {
+  identity: string;
+  streamId: string;
+  /** The `allowForwards` entry it connected to, which the audit log records. */
+  target: string;
+  stream: Promise<TcpStream>;
 }
 
 interface TtyEntry {

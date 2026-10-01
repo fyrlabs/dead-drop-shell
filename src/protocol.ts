@@ -221,6 +221,39 @@ export interface TtyCloseRequest {
 
 export type TtyRequest = TtyOpenRequest | TtyIoRequest | TtyCloseRequest;
 
+/**
+ * Opens a TCP connection from the server to `host:port`, which must be in the
+ * server's `shell.allowForwards`. Answers once connected or failed. Asking
+ * again with the same `streamId` returns the connection already open.
+ */
+export interface TcpOpenRequest {
+  v: 1;
+  op: 'tcp-open';
+  streamId: string;
+  host: string;
+  port: number;
+}
+
+/** Sends bytes and reads the reply, numbered like `TtyIoRequest`: `input` starts at `inputOffset`. */
+export interface TcpIoRequest {
+  v: 1;
+  op: 'tcp-io';
+  streamId: string;
+  /** Base64. */
+  input?: string;
+  inputOffset: number;
+  offset: number;
+  waitMs?: number;
+}
+
+export interface TcpCloseRequest {
+  v: 1;
+  op: 'tcp-close';
+  streamId: string;
+}
+
+export type TcpRequest = TcpOpenRequest | TcpIoRequest | TcpCloseRequest;
+
 export type TransferRequest =
   | PutOpenRequest
   | PutChunkRequest
@@ -241,7 +274,8 @@ export type ShellRequest =
   | TransferRequest
   | MkdirRequest
   | ListRequest
-  | TtyRequest;
+  | TtyRequest
+  | TcpRequest;
 
 export interface JobResult {
   jobId: string;
@@ -464,6 +498,37 @@ export interface TtyClosed {
 
 export type TtyResponse = TtyOpened | TtyOutput | TtyLost | TtyClosed;
 
+export interface TcpOpened {
+  streamId: string;
+}
+
+/** Bytes the remote end sent, from `offset`, as for `JobOutput`. */
+export interface TcpOutput {
+  streamId: string;
+  state: 'open' | 'closed';
+  offset: number;
+  frames: OutputFrame[];
+  next: number;
+  end: number;
+  /** Input bytes the server has applied. */
+  received: number;
+  /** Why it closed, when it did not close cleanly. */
+  error?: string;
+}
+
+/** The connection no longer exists: it idled out, was closed, or the server restarted. */
+export interface TcpLost {
+  streamId: string;
+  state: 'session_lost';
+  message: string;
+}
+
+export interface TcpClosed {
+  closed: boolean;
+}
+
+export type TcpResponse = TcpOpened | TcpOutput | TcpLost | TcpClosed;
+
 /** Terminals are bounded so a bad size cannot make the server allocate without limit. */
 export const MAX_TTY_DIMENSION = 1000;
 
@@ -506,6 +571,27 @@ function parseTty(source: Record<string, unknown>): TtyRequest {
     ...(source.cols === undefined
       ? {}
       : { cols: dimension(source.cols, 'cols'), rows: dimension(source.rows, 'rows') }),
+    ...(source.waitMs === undefined ? {} : { waitMs: count(source.waitMs, 'waitMs') }),
+  };
+}
+
+function parseTcp(source: Record<string, unknown>): TcpRequest {
+  if (!isJobId(source.streamId)) bad('streamId must be a UUID');
+  const streamId = source.streamId;
+  if (source.op === 'tcp-close') return { v: 1, op: 'tcp-close', streamId };
+  if (source.op === 'tcp-open') {
+    const port = count(source.port, 'port');
+    if (port < 1 || port > 65535) bad('port must be 1 to 65535');
+    return { v: 1, op: 'tcp-open', streamId, host: name(source.host), port };
+  }
+  if (source.input !== undefined && typeof source.input !== 'string') bad('input must be base64');
+  return {
+    v: 1,
+    op: 'tcp-io',
+    streamId,
+    inputOffset: count(source.inputOffset, 'inputOffset'),
+    offset: count(source.offset, 'offset'),
+    ...(source.input === undefined ? {} : { input: source.input }),
     ...(source.waitMs === undefined ? {} : { waitMs: count(source.waitMs, 'waitMs') }),
   };
 }
@@ -557,6 +643,9 @@ export function parseRequest(raw: unknown): ShellRequest {
   if (source.op === 'mkdir') return parseMkdir(source);
   if (source.op === 'tty-open' || source.op === 'tty-io' || source.op === 'tty-close') {
     return parseTty(source);
+  }
+  if (source.op === 'tcp-open' || source.op === 'tcp-io' || source.op === 'tcp-close') {
+    return parseTcp(source);
   }
   if (source.op === 'output' || source.op === 'cancel') {
     if (!isJobId(source.jobId)) bad('jobId must be a UUID');

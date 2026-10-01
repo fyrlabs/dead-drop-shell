@@ -122,6 +122,7 @@ describe('config', () => {
       transferChunkBytes: 4 * 1024 * 1024,
       maxSessions: 16,
       requestsPerMinute: 600,
+      allowForwards: [],
       auditLog: '/var/lib/ddshell/ddshell-audit.log',
       targets: {},
     });
@@ -151,10 +152,24 @@ describe('config', () => {
     [{ workspace: 'other' }, /configured workspace/],
     [{ maxSessions: 1.5 }, /maxSessions/],
     [{ requestsPerMinute: 0 }, /requestsPerMinute/],
+    [{ allowForwards: 'db:5432' }, /allowForwards/],
+    [{ allowForwards: ['db'] }, /host:port/],
+    [{ allowForwards: ['db:0'] }, /host:port/],
+    [{ allowForwards: ['*:80'] }, /host:port/],
+    [{ allowForwards: ['db:70000'] }, /host:port/],
     [{ auditLog: true }, /auditLog/],
     [{ auditLog: '' }, /auditLog/],
   ])('rejects %j', (shell, message) => {
     expect(() => parseShellConfig(shell, runtime(), '/etc')).toThrow(message);
+  });
+
+  it('normalises allowForwards entries to lowercase host:port', () => {
+    const { allowForwards } = parseShellConfig(
+      { allowForwards: ['DB.Internal:5432', '[::1]:80', '127.0.0.1:8080'] },
+      runtime(),
+      '/etc',
+    );
+    expect(allowForwards).toEqual(['db.internal:5432', '::1:80', '127.0.0.1:8080']);
   });
 
   it('resolves a relative ledger directory against the config file', () => {

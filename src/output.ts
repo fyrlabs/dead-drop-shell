@@ -1,3 +1,5 @@
+import { DeadDropError } from '@fyrlabs/dead-drop/protocol';
+
 import type { OutputFrame, StoredOutput } from './protocol.js';
 
 /** Most output bytes one `output` answer carries. The client asks again for the rest. */
@@ -83,6 +85,21 @@ export class OutputBuffer {
   private wake(): void {
     for (const waiter of [...this.waiters]) waiter();
   }
+}
+
+/**
+ * The part of `bytes` the server has not applied yet. They start at `offset` in
+ * everything the client has sent and `received` of those arrived, so a request
+ * delivered twice adds nothing, and a gap means the client lost track.
+ */
+export function freshInput(received: number, offset: number, bytes: Buffer): Buffer {
+  if (offset > received) {
+    throw new DeadDropError(
+      'BAD_REQUEST',
+      `input starts at ${offset} but only ${received} bytes have arrived`,
+    );
+  }
+  return bytes.subarray(received - offset);
 }
 
 /** Reads a completed job's output back out of its ledger record. */

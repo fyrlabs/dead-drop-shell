@@ -9,6 +9,12 @@ export type AuditEvent =
   | { event: 'session-open' | 'session-close'; controller: string; sessionId: string }
   | { event: 'tty-open' | 'tty-close'; controller: string; ttyId: string }
   | {
+      event: 'forward-open' | 'forward-close';
+      controller: string;
+      streamId: string;
+      target: string;
+    }
+  | {
       event: 'exec';
       controller: string;
       jobId: string;
