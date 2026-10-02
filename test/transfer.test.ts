@@ -24,6 +24,7 @@ import { ShellClient } from '../src/client.js';
 import { parseShellConfig } from '../src/config.js';
 import { type ShellRequest, type TransferOpened } from '../src/protocol.js';
 import { ShellServer } from '../src/server.js';
+import { walk } from '../src/transfer.js';
 import { keyLines, waitFor } from './helpers.js';
 
 let root: string;
@@ -323,5 +324,21 @@ describe('file transfer', () => {
     }).catch((e: unknown) => e);
     expect(error).toMatchObject({ code: 'BAD_REQUEST' });
     expect(existsSync(join(home, 'x'))).toBe(false);
+  });
+});
+
+describe('walk limits', () => {
+  it('refuses a tree with more entries than the limit, and one with more skipped than the limit', async () => {
+    const tree = join(local, 'tree');
+    await mkdir(tree);
+    for (const name of ['a', 'b', 'c']) await writeFile(join(tree, name), name);
+    expect((await walk(tree, 3)).entries).toHaveLength(3);
+    await expect(walk(tree, 2)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+
+    const dangling = join(local, 'dangling');
+    await mkdir(dangling);
+    for (const name of ['x', 'y', 'z']) await symlink('missing', join(dangling, name));
+    expect((await walk(dangling, 3)).skipped).toHaveLength(3);
+    await expect(walk(dangling, 2)).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
   });
 });

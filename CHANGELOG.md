@@ -14,6 +14,7 @@
 - In bash, `declare` inside a command now needs `-g` to keep the variable for later commands.
 - `ddshell <target> --tty` opens a real terminal, so vim, top and tab completion work. Keys travel in batches and the screen comes back by long poll, so each keystroke echoes after a round trip. Type `~.` at the start of a line to disconnect. The server needs `node-pty`, which compiles on Linux (python3, make, g++); without it line mode is unaffected.
 - Fixed: output piped to a slow reader (`ddshell exec host -- cmd | less`, or a file on a slow disk) could be cut off, silently and with exit code 0, because ddshell exited before its standard output had been written. It now waits for output to drain.
+- Fixed: a recursive copy of a tree with more than 100,000 entries that cannot be copied (broken links, sockets) is refused like one with too many files, instead of building an unbounded answer.
 - `ddshell forward <target> -L 8080:db.internal:5432` listens locally and relays each connection through the server, like `ssh -L`. The server only connects to hosts listed in its `shell.allowForwards`, which is empty by default. Every byte costs transport round trips, so it suits fast transports.
 - `examples/ddshell-server@.service` runs one server per person, each as their own account with their own repository and secret. See `docs/per-person.md`.
 - `ddshell unit` prints a systemd unit that runs the server by absolute paths, so it works with nvm or a user npm prefix. `--template` prints the per-person one.

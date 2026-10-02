@@ -102,9 +102,14 @@ export async function makeTree(
 
 /**
  * Lists `path` for a recursive copy. Symlinks are followed, as scp -r does,
- * except into a directory that is already one of their own parents.
+ * except into a directory that is already one of their own parents. More than
+ * `limit` entries, or more than `limit` skipped ones, refuses the whole listing:
+ * the answer travels in one request, so neither list may grow without bound.
  */
-export async function walk(path: string): Promise<Omit<ListResult, 'path'>> {
+export async function walk(
+  path: string,
+  limit = MAX_TREE_ENTRIES,
+): Promise<Omit<ListResult, 'path'>> {
   const top = await stat(path).catch((error: unknown) => {
     throw fsError(error, path);
   });
@@ -121,7 +126,7 @@ export async function walk(path: string): Promise<Omit<ListResult, 'path'>> {
       names = (await readdir(directory)).sort();
     } catch (error) {
       if (prefix === '') throw fsError(error, directory);
-      skipped.push({ path: prefix, reason: fsError(error, directory).message });
+      skip({ path: prefix, reason: fsError(error, directory).message });
       return;
     }
     for (const name of names) {
@@ -129,13 +134,13 @@ export async function walk(path: string): Promise<Omit<ListResult, 'path'>> {
       const full = join(directory, name);
       const stats = await stat(full).catch(() => undefined);
       if (!stats) {
-        skipped.push({ path: relative, reason: 'broken symbolic link or vanished' });
+        skip({ path: relative, reason: 'broken symbolic link or vanished' });
         continue;
       }
       if (stats.isDirectory()) {
         const id = `${stats.dev}:${stats.ino}`;
         if (parents.includes(id)) {
-          skipped.push({ path: relative, reason: 'symbolic link loop' });
+          skip({ path: relative, reason: 'symbolic link loop' });
           continue;
         }
         add({ path: relative, kind: 'dir', mode: stats.mode & 0o777, size: 0 });
@@ -143,15 +148,21 @@ export async function walk(path: string): Promise<Omit<ListResult, 'path'>> {
       } else if (stats.isFile()) {
         add({ path: relative, kind: 'file', mode: stats.mode & 0o777, size: stats.size });
       } else {
-        skipped.push({ path: relative, reason: 'not a regular file or directory' });
+        skip({ path: relative, reason: 'not a regular file or directory' });
       }
     }
   };
   const add = (entry: TreeEntry) => {
-    if (entries.length >= MAX_TREE_ENTRIES) {
-      fail('PAYLOAD_TOO_LARGE', `${path} holds more than ${MAX_TREE_ENTRIES} entries`);
+    if (entries.length >= limit) {
+      fail('PAYLOAD_TOO_LARGE', `${path} holds more than ${limit} entries`);
     }
     entries.push(entry);
+  };
+  const skip = (item: ListResult['skipped'][number]) => {
+    if (skipped.length >= limit) {
+      fail('PAYLOAD_TOO_LARGE', `${path} has more than ${limit} entries that cannot be copied`);
+    }
+    skipped.push(item);
   };
   await visit(path, '', [`${top.dev}:${top.ino}`]);
   return { ...root, size: 0, entries, skipped };
