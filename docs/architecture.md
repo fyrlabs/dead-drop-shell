@@ -51,7 +51,7 @@ A named session's id is derived from its name: sha256 of `ddshell-session\0<name
 
 Two more operations serve `-r`, neither with a `transferId` since neither holds state:
 
-- `list` stats a path and, for a directory, returns every entry below it (relative path, kind, mode, size) in one answer, parents first, plus what a copy must skip: special files, broken links, symlinks back to one of their own parents, unreadable directories. At most 100,000 entries.
+- `list` stats a path and, for a directory, returns every entry below it (relative path, kind, mode, size) in one answer, parents first, plus what a copy must skip: special files, broken links, symlinks back to one of their own parents, unreadable directories. At most 100,000 entries, and at most 100,000 skipped ones; past either the listing is refused with `PAYLOAD_TOO_LARGE`.
 - `mkdir` creates a directory tree in one request: the root lands at the path as a file would (inside an existing directory, under its name), then each relative path below it. Existing directories are kept. Relative paths with `..`, `.` or empty parts are refused.
 
 Files in the tree then go through the operations above, four at a time. A file no bigger than 64 KiB and the server's `chunkBytes` travels inline: `put-open` carries its `data` and answers `committed`, and `get-open` with `inline` answers with the `data` and releases the transfer at once. A server that ignores these fields gives an ordinary open and the client falls back to pieces.
