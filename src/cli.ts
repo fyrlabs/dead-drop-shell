@@ -447,6 +447,17 @@ async function serve(configPath: string): Promise<number> {
     shell: config.shell,
     baseDir: config.baseDir,
   });
+  // SIGHUP re-reads the authorised keys, so revoking one needs no restart. A
+  // config that no longer loads keeps the keys already in force.
+  const reload = () =>
+    loadConfig(configPath)
+      .then(({ shell }) => running.setAuthorizedKeys(shell.authorizedKeys))
+      .catch((error) =>
+        running.runtime.logger.error('authorized keys not reloaded; keeping the old ones', {
+          error: String(error),
+        }),
+      );
+  process.on('SIGHUP', () => void reload());
   await new Promise<void>((resolve) => {
     process.once('SIGINT', resolve);
     process.once('SIGTERM', resolve);

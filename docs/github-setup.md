@@ -115,4 +115,4 @@ ddshell vm
 
 ## Removing a controller
 
-Delete the controller's line from `ddshell_authorized_keys` and restart the server; its key is refused from then on, even though it still holds the workspace secret. It cannot read other controllers' traffic, but it can still drop or delay messages until you rotate the secret with dead-drop (`ddrop peer revoke <peer>` and `ddrop rotate`, see dead-drop's `docs/security-model.md`). The server re-reads its config only on restart.
+Delete the controller's line from `ddshell_authorized_keys` and reload the server (`systemctl reload ddshell-server@alice`, or `kill -HUP` its process); its key is refused from then on, including on terminals and forwards it already has open (their processes stay until the idle sweep closes them, but nothing can reach them), even though it still holds the workspace secret. It cannot read other controllers' traffic, but it can still drop or delay messages until you rotate the secret with dead-drop (`ddrop peer revoke <peer>` and `ddrop rotate`, see dead-drop's `docs/security-model.md`). Apart from the authorised keys, the server re-reads its config only on restart.

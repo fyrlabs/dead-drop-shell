@@ -223,6 +223,26 @@ describe('ddshell over the filesystem transport', () => {
     await expect(readFile(join(home, 'pwned'))).rejects.toThrow();
   });
 
+  it('stops serving a key removed by setAuthorizedKeys, and keeps the rest on a bad line', async () => {
+    const server = await startServer({ allowControllers: ['laptop', 'phone'] });
+    const laptop = (await startClient('laptop')).session('vm');
+    const phone = (await startClient('phone')).session('vm');
+    expect((await run(laptop, 'echo up')).out).toBe('up\n');
+    expect((await run(phone, 'echo up')).out).toBe('up\n');
+
+    const [keepLaptop] = await keyLines(root, ['laptop']);
+    expect(() => server.setAuthorizedKeys([keepLaptop!, 'not a key'])).toThrow();
+    expect((await run(phone, 'echo still')).out).toBe('still\n');
+
+    server.setAuthorizedKeys([keepLaptop!]);
+    const error = await phone
+      .exec('touch pwned', { timeoutMs: 10_000 })
+      .catch((caught: unknown) => caught);
+    expect(DeadDropError.is(error) && error.code).toBe('UNAUTHORIZED');
+    await expect(readFile(join(home, 'pwned'))).rejects.toThrow();
+    expect((await run(laptop, 'echo kept')).out).toBe('kept\n');
+  });
+
   it('refuses protocol v1 unless allowV1, and says how to fix it', async () => {
     const strict = await startServer();
     const refused = await (

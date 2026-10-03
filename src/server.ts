@@ -234,6 +234,21 @@ export class ShellServer {
     return server;
   }
 
+  /**
+   * Replaces the authorised keys, effective from the next request. Every call is
+   * checked against the signing key, so a removed key's open terminal or forward
+   * is refused on its next call and its idle shell is swept. Throws, changing
+   * nothing, if a line does not parse.
+   */
+  setAuthorizedKeys(lines: string[]): void {
+    const next = lines.map((line) => parsePublicKey(line));
+    this.authorized.clear();
+    for (const key of next) this.authorized.set(key.fingerprint, key);
+    this.runtime.logger.info('authorized keys reloaded', {
+      authorizedKeys: next.map(({ fingerprint, comment }) => `${fingerprint} ${comment}`.trim()),
+    });
+  }
+
   /** Process ids of live session shells. For tests and diagnostics. */
   sessionPids(): number[] {
     return [...this.sessions.values()].flatMap(({ session }) => session.pid ?? []);

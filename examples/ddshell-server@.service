@@ -19,6 +19,8 @@ User=%i
 WorkingDirectory=~
 # No --config: ddshell reads ~/.deaddrop/ddshell.json of the instance's account.
 ExecStart=/usr/bin/env ddshell serve
+# Reload re-reads the authorised keys, so revoking a key needs no restart.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 # Stop sends SIGTERM; the server closes every session shell before exiting.

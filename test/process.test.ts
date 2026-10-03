@@ -235,6 +235,39 @@ describe('ddshell processes', () => {
     extraServers.length = 0;
   }, 90_000);
 
+  it('re-reads authorizedKeysFile on SIGHUP, and keeps the old keys when it cannot', async () => {
+    const configPath = await writeFsConfig('vm');
+    const laptop = await writeFsConfig('laptop');
+    const keysFile = join(root, 'authorized_keys');
+    const [laptopKey] = await keyLines(root, ['laptop']);
+    await writeFile(keysFile, `${laptopKey}\n`);
+    const config = JSON.parse(await readFile(configPath, 'utf8'));
+    config.shell.authorizedKeys = [];
+    config.shell.authorizedKeysFile = keysFile;
+    await writeFile(configPath, JSON.stringify(config));
+
+    const serving = run(['serve', '--config', configPath]);
+    server = serving.child;
+    await waitFor(() => serving.output().includes('shell server ready'), 15_000);
+    const exec = async () => {
+      const client = run(['exec', 'vm', '--config', laptop, '--timeout', '10000', '--', 'echo hi']);
+      return { code: await exited(client.child), output: client.output() };
+    };
+    expect(await exec()).toMatchObject({ code: 0 });
+
+    await writeFile(keysFile, 'not a key\n');
+    server.kill('SIGHUP');
+    await waitFor(() => serving.output().includes('authorized keys not reloaded'), 10_000);
+    expect(await exec()).toMatchObject({ code: 0 });
+
+    await writeFile(keysFile, '# nobody\n');
+    server.kill('SIGHUP');
+    await waitFor(() => serving.output().includes('authorized keys reloaded'), 10_000);
+    const refused = await exec();
+    expect(refused.code).not.toBe(0);
+    expect(refused.output).toMatch(/UNAUTHORIZED/);
+  }, 60_000);
+
   // Up to dead-drop 0.16.0 the mailbox stopped polling while a handler ran,
   // so one long command held up every other request to the server.
   it('answers pings, uploads and other commands while a long command runs', async () => {

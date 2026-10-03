@@ -73,6 +73,8 @@ export function systemdUnit(options: UnitOptions): string {
     `User=${template ? '%i' : options.account}`,
     'WorkingDirectory=~',
     `ExecStart=${exec.join(' ')}`,
+    '# Reload re-reads the authorised keys, so revoking a key needs no restart.',
+    'ExecReload=/bin/kill -HUP $MAINPID',
     'Restart=on-failure',
     'RestartSec=5',
     '# Stop sends SIGTERM; the server closes every session shell before exiting.',
