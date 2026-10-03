@@ -223,6 +223,36 @@ describe('ddshell over the filesystem transport', () => {
     await expect(readFile(join(home, 'pwned'))).rejects.toThrow();
   });
 
+  it('keeps another channel on the workspace answering while a command runs', async () => {
+    // Workspace concurrency 1: without the shell's own lane, the running command
+    // would hold the only handler slot and the probe would wait for it.
+    const runtime = runtimeConfig('vm');
+    const server = await ShellServer.start({
+      runtime: {
+        ...runtime,
+        workspaces: runtime.workspaces.map((w) => ({ ...w, concurrency: 1 })),
+      },
+      shell: shellConfig(runtime, {
+        authorizedKeys: await keyLines(root, ['laptop']),
+        allowControllers: ['laptop'],
+      }),
+      home,
+    });
+    cleanup.push(() => server.stop());
+    server.runtime.workspace('shell').handle('probe', () => new TextEncoder().encode('pong'));
+    const client = await startClient();
+    const long = client.session('vm').exec('sleep 4', { timeoutMs: 20_000 });
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const started = Date.now();
+    const reply = await client.runtime
+      .workspace('shell')
+      .request('vm', 'probe', new Uint8Array(), { timeoutMs: 3_000 });
+    expect(new TextDecoder().decode(reply.payload)).toBe('pong');
+    expect(Date.now() - started).toBeLessThan(3_000);
+    await long;
+  }, 30_000);
+
   it('stops serving a key removed by setAuthorizedKeys, and keeps the rest on a bad line', async () => {
     const server = await startServer({ allowControllers: ['laptop', 'phone'] });
     const laptop = (await startClient('laptop')).session('vm');

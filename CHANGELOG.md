@@ -21,7 +21,7 @@
 - `ddshell unit` prints a systemd unit that runs the server by absolute paths, so it works with nvm or a user npm prefix. `--template` prints the per-person one.
 - Each controller is held to 16 live sessions and 600 requests a minute by default (`shell.maxSessions`, `shell.requestsPerMinute`). A refused command is not run.
 - The server keeps an audit log, one JSON line per session, command, file transfer and refusal, with who, exit code, duration and size, never the command, its output or paths. Set `shell.auditLog` to move it or `false` to turn it off.
-- A slow command in one session no longer holds up the other sessions over git or GitHub. This needs dead-drop 0.16.1, which is now the minimum.
+- A slow command in one session no longer holds up the other sessions over git or GitHub. The shell runs on its own handler lanes, so this needs dead-drop 0.17.0, which is now the minimum.
 - `ddshell check` tests a config before you rely on it: it parses, the secret file is private, the server's shell, ledger and audit log work, every transport answers, and each target is announcing itself.
 - `ddshell jobs <target>` lists your jobs on a server, newest first, and `ddshell status <target> <job>` shows one by its id or the start of it. They show state, exit code and timing, never the command or its output.
 - `ddshell ping <target>` checks a server is up and shows its versions, uptime and round trip. `--count` repeats it and prints min, median and max.

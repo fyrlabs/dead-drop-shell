@@ -38,7 +38,7 @@ Never put a secret in the file. Reference it: `"secrets": ["${file:~/.deaddrop/d
 
 ## Values the server changes
 
-When the shell's workspace does not set `concurrency`, the server uses `8` instead of dead-drop's default of `1`. At `1`, one `sleep 60` would hold up every other session's commands. The limit is shared by every request to the server, not only commands: while eight commands are running, a ninth command, a `ping` and every chunk of a file transfer wait for one of them to finish. Raise `concurrency` on the server's workspace if people keep long commands running.
+When the shell's workspace does not set `concurrency`, the server runs up to `8` requests at once on its own lanes (one for `shell.v2`, one for `shell.v1`) instead of dead-drop's default of `1`; at `1`, one `sleep 60` would hold up every other session's commands. The workspace's own `concurrency` then only covers receiving messages and any other service on it, so a long command never holds those up (needs dead-drop 0.17). The limit is shared by every request to the shell, not only commands: while eight commands are running, a ninth command, `ping` and every chunk of a file transfer wait for one of them to finish, because they travel on the same channel. Raise `concurrency` on the server's workspace if people keep long commands running.
 
 ## Limits per controller
 

@@ -47,7 +47,7 @@
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm test"
   },
   "dependencies": {
-    "@fyrlabs/dead-drop": "^0.16.1"
+    "@fyrlabs/dead-drop": "^0.17.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

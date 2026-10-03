@@ -67,8 +67,9 @@ export interface ServerOptions {
 }
 
 /**
- * Handlers run one at a time by default, so a single `sleep 60` would hold up
- * every other session. Used when the workspace does not set `concurrency`.
+ * Requests the shell's lanes run at once. dead-drop's default of one would let a
+ * single `sleep 60` hold up every other session. Used when the workspace does
+ * not set `concurrency`.
  */
 const DEFAULT_CONCURRENCY = 8;
 
@@ -173,13 +174,7 @@ export class ShellServer {
     );
     await audit.open();
 
-    const config: RuntimeConfig = {
-      ...options.runtime,
-      workspaces: options.runtime.workspaces.map((workspace) => ({
-        ...workspace,
-        concurrency: workspace.concurrency ?? DEFAULT_CONCURRENCY,
-      })),
-    };
+    const config: RuntimeConfig = options.runtime;
     const runtime = new DeadDropRuntime({
       config,
       ...(options.baseDir ? { baseDir: options.baseDir } : {}),
@@ -211,11 +206,22 @@ export class ShellServer {
         'shell.allowV1 is on: protocol v1 trusts peer ids, which any workspace member can claim',
       );
     }
-    server.workspace.service(SHELL_SERVICE, {
-      [SHELL_METHOD]: (input, context) => server.handle(input, context),
-    });
-    server.workspace.handle(SHELL_CHANNEL_V2, (payload, context) =>
-      server.handleSealed(payload, context),
+    // Each channel gets a lane of its own, so a long command holds up neither
+    // another service on this workspace nor dead-drop's receiving of messages.
+    const lane = {
+      concurrency:
+        config.workspaces.find(({ name }) => name === server.workspace.name)?.concurrency ??
+        DEFAULT_CONCURRENCY,
+    };
+    server.workspace.service(
+      SHELL_SERVICE,
+      { [SHELL_METHOD]: (input, context) => server.handle(input, context) },
+      lane,
+    );
+    server.workspace.handle(
+      SHELL_CHANNEL_V2,
+      (payload, context) => server.handleSealed(payload, context),
+      lane,
     );
     const interval = Math.max(10, Math.min(options.shell.idleTimeoutMs / 4, 30_000));
     // Deliberately not unref'd: dead-drop unrefs its own poll timers, and over
