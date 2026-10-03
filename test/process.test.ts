@@ -235,6 +235,34 @@ describe('ddshell processes', () => {
     extraServers.length = 0;
   }, 90_000);
 
+  it('ends quietly with the command exit code when the reader closes the pipe', async () => {
+    const serving = run(['serve', '--config', await writeFsConfig('vm')]);
+    server = serving.child;
+    await waitFor(() => serving.output().includes('shell server ready'), 15_000);
+    const exec = spawn(
+      process.execPath,
+      [
+        bin,
+        'exec',
+        'vm',
+        '--config',
+        await writeFsConfig('laptop'),
+        '--timeout',
+        '60000',
+        '--',
+        `head -c 3000000 /dev/zero | tr '\\0' 'a'; exit 7`,
+      ],
+      { cwd: join(root, 'home'), env: { PATH: process.env.PATH, HOME: join(root, 'home') } },
+    );
+    exec.stdin!.end();
+    let errors = '';
+    exec.stderr!.on('data', (chunk: Buffer) => (errors += chunk.toString()));
+    // Like `| head -c 10`: take the first bytes, then hang up.
+    exec.stdout!.once('data', () => exec.stdout!.destroy());
+    expect(await exited(exec)).toBe(7);
+    expect(errors).not.toMatch(/EPIPE|Unhandled|node:internal/);
+  }, 30_000);
+
   it('re-reads authorizedKeysFile on SIGHUP, and keeps the old keys when it cannot', async () => {
     const configPath = await writeFsConfig('vm');
     const laptop = await writeFsConfig('laptop');
