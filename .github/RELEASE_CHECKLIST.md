@@ -10,7 +10,7 @@ The version moves once per release, not per commit. Between releases, `CHANGELOG
 
 - [ ] `main` is green in CI.
 - [ ] `npm ci && npm run verify` passes from a clean checkout.
-- [ ] `npm pack --dry-run` lists only `dist/`, `examples/`, `README.md`, `LICENSE`, `package.json`, and nothing left over from renamed source files.
+- [ ] `npm pack --dry-run` lists only `dist/`, `docs/`, `examples/`, `README.md`, `SECURITY.md`, `CHANGELOG.md`, `LICENSE`, `package.json`, and nothing left over from renamed source files.
 - [ ] No tracked file contains a home path: `git ls-files -z | grep -zv '^\.github/RELEASE_CHECKLIST\.md$' | xargs -0 grep -nlI -e '/Users/' -e '/home/runner'` prints nothing.
 - [ ] `docs/configuration.md` matches `src/config.ts`.
 

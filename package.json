@@ -27,8 +27,11 @@
   },
   "files": [
     "dist",
+    "docs",
     "examples",
-    "README.md"
+    "README.md",
+    "SECURITY.md",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=20.11"
