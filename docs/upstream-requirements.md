@@ -42,4 +42,4 @@ dead-drop unrefs all its clock timers. Only the filesystem transport holds a ref
 
 ## Lifecycle hooks the shell needed
 
-Start after the runtime is ready, a periodic tick (idle sweeping, ledger pruning), and an orderly stop that runs before the runtime shuts down so child processes are killed while replies can still be sent. Streaming output and cancellation (proposal phase four) would add ordered chunks and a cancel signal delivered to a running handler.
+Start after the runtime is ready, a periodic tick (idle sweeping, ledger pruning), and an orderly stop that runs before the runtime shuts down so child processes are killed while replies can still be sent. Streaming output and cancellation need ordered chunks and a cancel signal delivered to a running handler.

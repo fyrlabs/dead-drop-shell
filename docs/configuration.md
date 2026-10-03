@@ -48,7 +48,7 @@ Each controller, by key, gets its own `maxSessions` and `requestsPerMinute`; one
 
 ## Audit log
 
-One JSON object per line, appended as things happen: `session-open`, `exec`, `cancel`, `session-close`, `put`, `get` and `refused`. Every line has `time` and `controller` (`key:SHA256:...`, or `peer:<id>` for a refusal before the key was trusted), plus `name`, the key's comment, when the key is authorised. `exec` lines carry `jobId`, `sessionId`, `state`, `exitCode`, `durationMs`, output `bytes`, `truncated`, `timedOut` and `replayed`; transfer lines carry `transferId` and `bytes`; `refused` lines carry `code` and `reason`.
+One JSON object per line, appended as things happen: `session-open`, `exec`, `cancel`, `session-close`, `tty-open`, `tty-close`, `forward-open`, `forward-close`, `put`, `get` and `refused`. Every line has `time` and `controller` (`key:SHA256:...`, or `peer:<id>` for a refusal before the key was trusted), plus `name`, the key's comment, when the key is authorised. `exec` lines carry `jobId`, `sessionId`, `state`, `exitCode`, `durationMs`, output `bytes`, `truncated`, `timedOut` and `replayed`; `tty-open` and `tty-close` carry `ttyId`; `forward-open` and `forward-close` carry `streamId` and the `target` host:port; transfer lines carry `transferId` and `bytes`; `refused` lines carry `code` and `reason`.
 
 It never holds command text, output or file paths. The ledger keeps output for `ledgerRetentionMs`; the audit log keeps who did what and how it went, for as long as you keep the file. The server reopens the file for every line, so `logrotate` can rename it without `copytruncate`. Nothing trims it, and every refused request adds a line, so a workspace member hammering the server with bad requests grows it; rotate it.
 

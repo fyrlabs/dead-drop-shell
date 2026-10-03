@@ -28,4 +28,4 @@ Prettier and ESLint decide code style. In markdown, one paragraph per line, no h
 
 ## Before proposing a feature
 
-Read "What it is not" in the [README](README.md). PTY support, streaming and cancellation are planned as a separate phase; a pull request for them should start as an issue describing the protocol change.
+Read "What it is not" in the [README](README.md). A pull request that changes the protocol should start as an issue describing the change.
