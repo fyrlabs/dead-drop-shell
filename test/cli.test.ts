@@ -22,8 +22,7 @@ import { ShellServer } from '../src/server.js';
 import { VERSION, main, type Io } from '../src/cli.js';
 import { loadConfig } from '../src/config.js';
 import { formatPublicKey, readKeyPair } from '../src/keys.js';
-import { keyLines, waitFor } from './helpers.js';
-import { loadPty } from '../src/tty.js';
+import { keyLines, ptyInstalled, waitFor } from './helpers.js';
 
 let root: string;
 let home: string;
@@ -685,16 +684,6 @@ describe('ddshell unit', () => {
   });
 });
 
-/** node-pty is optional: on a machine where it did not build, there is no terminal to run. */
-const ptyBuilt = (() => {
-  try {
-    loadPty();
-    return true;
-  } catch {
-    return false;
-  }
-})();
-
 describe('ddshell --tty', () => {
   function screen() {
     const streams = terminalIo();
@@ -720,7 +709,7 @@ describe('ddshell --tty', () => {
     }
   });
 
-  it.skipIf(!ptyBuilt)(
+  it.skipIf(!ptyInstalled)(
     'runs a shell on a pty: sizes it, follows a resize, and exits with its code',
     async () => {
       const { streams, out } = screen();
@@ -747,16 +736,19 @@ describe('ddshell --tty', () => {
     30_000,
   );
 
-  it.skipIf(!ptyBuilt)('~. at the start of a line disconnects and closes the shell', async () => {
-    const { streams } = screen();
-    const running = main(['vm', '--tty', '--config', controllerConfig], streams);
-    streams.stdin.write('echo up""\n');
-    await waitFor(() => streams.out().includes('up'), 10_000);
+  it.skipIf(!ptyInstalled)(
+    '~. at the start of a line disconnects and closes the shell',
+    async () => {
+      const { streams } = screen();
+      const running = main(['vm', '--tty', '--config', controllerConfig], streams);
+      streams.stdin.write('echo up""\n');
+      await waitFor(() => streams.out().includes('up'), 10_000);
 
-    streams.stdin.write('\r~.');
-    expect(await promptly(running)).toBe(255);
-    expect(streams.err()).toMatch(/disconnected from vm/);
-  });
+      streams.stdin.write('\r~.');
+      expect(await promptly(running)).toBe(255);
+      expect(streams.err()).toMatch(/disconnected from vm/);
+    },
+  );
 });
 
 describe('ddshell forward', () => {

@@ -17,7 +17,6 @@ import { ShellClient, type RemoteSession } from '../src/client.js';
 import { parseShellConfig, type ShellConfig } from '../src/config.js';
 import { formatPublicKey, parsePublicKey, readKeyPair } from '../src/keys.js';
 import { JobLedger } from '../src/ledger.js';
-import { loadPty } from '../src/tty.js';
 import {
   isJobId,
   namedSessionId,
@@ -31,7 +30,7 @@ import {
   type TtyOpened,
   type TtyOutput,
 } from '../src/protocol.js';
-import { isAlive, keyLines, waitFor } from './helpers.js';
+import { isAlive, keyLines, ptyInstalled, waitFor } from './helpers.js';
 
 let root: string;
 let home: string;
@@ -677,17 +676,7 @@ describe('job listing', () => {
   });
 });
 
-/** node-pty is optional: on a machine where it did not build, these tests have nothing to run. */
-const ptyBuilt = (() => {
-  try {
-    loadPty();
-    return true;
-  } catch {
-    return false;
-  }
-})();
-
-describe.skipIf(!ptyBuilt)('terminal', () => {
+describe.skipIf(!ptyInstalled)('terminal', () => {
   /** A caller's view of one terminal: what it typed, and the screen so far. */
   function terminal(client: ShellClient, ttyId = randomUUID()) {
     const call = <Result>(request: ShellRequest) =>
