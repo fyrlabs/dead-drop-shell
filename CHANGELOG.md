@@ -1,8 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
-- **Breaking:** controllers now sign in with their own key instead of a peer id. Run `ddshell keygen` on each controller and add the line it prints to the server's `shell.authorizedKeys` or `shell.authorizedKeysFile`. Old controllers are refused unless the server sets `shell.allowV1`.
+### Breaking
+
+- Controllers now sign in with their own key instead of a peer id. Run `ddshell keygen` on each controller and add the line it prints to the server's `shell.authorizedKeys` or `shell.authorizedKeysFile`. Old controllers are refused unless the server sets `shell.allowV1`.
+- dead-drop 0.17.0 is now the minimum.
+- In bash, `declare` inside a command now needs `-g` to keep the variable for later commands.
+
+### Changes
+
 - Commands and output are sealed end to end, so other members of the workspace can no longer read them.
 - The controller remembers each server's host key on first contact and refuses one that changes, like ssh. `ddshell hostkey` prints a server's key so you can trust it up front with `shell.strictHostKeys`.
 - Output and file transfers no longer go through base64, so they are a third smaller on the wire.
@@ -13,7 +20,6 @@
 - Ctrl-C cancels the remote command, in interactive sessions and in `ddshell exec`, and keeps your session and its cwd. Press it twice to leave without waiting.
 - Revoke a controller without a restart: remove its key and send the server SIGHUP (`systemctl reload` with the shipped unit).
 - Piping into a reader that quits early (`ddshell exec vm -- cmd | head`) no longer prints a stack trace; the command's exit code is kept.
-- In bash, `declare` inside a command now needs `-g` to keep the variable for later commands.
 - `ddshell <target> --tty` opens a real terminal, so vim, top and tab completion work. Keys travel in batches and the screen comes back by long poll, so each keystroke echoes after a round trip. Type `~.` at the start of a line to disconnect. The server needs `node-pty`, which compiles on Linux (python3, make, g++); without it line mode is unaffected.
 - Fixed: output piped to a slow reader (`ddshell exec host -- cmd | less`, or a file on a slow disk) could be cut off, silently and with exit code 0, because ddshell exited before its standard output had been written. It now waits for output to drain.
 - Fixed: a recursive copy of a tree with more than 100,000 entries that cannot be copied (broken links, sockets) is refused like one with too many files, instead of building an unbounded answer.
@@ -22,16 +28,16 @@
 - `ddshell unit` prints a systemd unit that runs the server by absolute paths, so it works with nvm or a user npm prefix. `--template` prints the per-person one.
 - Each controller is held to 16 live sessions and 600 requests a minute by default (`shell.maxSessions`, `shell.requestsPerMinute`). A refused command is not run.
 - The server keeps an audit log, one JSON line per session, command, file transfer and refusal, with who, exit code, duration and size, never the command, its output or paths. Set `shell.auditLog` to move it or `false` to turn it off.
-- A slow command in one session no longer holds up the other sessions over git or GitHub. The shell runs on its own handler lanes, so this needs dead-drop 0.17.0, which is now the minimum.
+- A slow command in one session no longer holds up the other sessions over git or GitHub. The shell runs on its own dead-drop handler lanes.
 - `ddshell check` tests a config before you rely on it: it parses, the secret file is private, the server's shell, ledger and audit log work, every transport answers, and each target is announcing itself.
 - `ddshell jobs <target>` lists your jobs on a server, newest first, and `ddshell status <target> <job>` shows one by its id or the start of it. They show state, exit code and timing, never the command or its output.
 - `ddshell ping <target>` checks a server is up and shows its versions, uptime and round trip. `--count` repeats it and prints min, median and max.
 - `ddshell exec a,b,c -- <command>` runs a command on several machines at once, prefixes each output line with its machine, and exits with the worst exit code.
 - The server example now uses the plain git transport, so the server machine needs only git and a token for the drop repository, not `gh`.
-- Keep runtime logs out of the client's output unless `--debug` is passed.
-- Make Ctrl-D leave an interactive session reliably, including while a remote command is pending.
-- Make a second Ctrl-C abandon a pending local wait immediately while leaving the remote command's outcome unchanged.
-- Make the GitHub examples safer for always-on use by restoring the 5-second fetch freshness default and backing idle polling off to 30 seconds.
+- Runtime logs stay out of the client's output unless you pass `--debug`.
+- Ctrl-D leaves an interactive session reliably, even while a remote command is pending.
+- A second Ctrl-C stops waiting at once; the remote command's outcome is unchanged.
+- The GitHub examples are safer for always-on use: fetch freshness is back to the 5-second default and idle polling backs off to 30 seconds.
 
 ## 0.1.0
 
