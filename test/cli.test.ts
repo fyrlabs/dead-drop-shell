@@ -726,7 +726,11 @@ describe('ddshell --tty', () => {
       await waitFor(() => streams.out().includes('10 50'), 10_000);
 
       // Ctrl-C is a key here: the remote shell gets it, ddshell does not leave.
-      streams.stdin.write('sleep 30\u0003');
+      // Linux discards typeahead sent with the Ctrl-C, so type on after its echo.
+      streams.stdin.write('sleep 30\n');
+      await waitFor(() => streams.out().includes('sleep 30'), 10_000);
+      streams.stdin.write('\u0003');
+      await waitFor(() => streams.out().includes('^C'), 10_000);
       streams.stdin.write('echo still""here\n');
       await waitFor(() => streams.out().includes('stillhere'), 10_000);
 
