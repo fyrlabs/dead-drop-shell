@@ -134,6 +134,14 @@ describe.each(shells)('ShellSession with %s', (path) => {
     expect((await session.run('echo x')).sessionClosed).toBe(true);
   });
 
+  it('keeps output that is still in the pipes when the shell exits', async () => {
+    // The late write lands after `exit`, as the last output can on a busy machine.
+    const session = open();
+    const result = await session.run('(sleep 0.2; echo late >&2) & exit 7');
+    expect(result.exitCode).toBe(7);
+    expect(result.stderr.toString()).toBe('late\n');
+  });
+
   it('kills the session when a command runs past its timeout', async () => {
     const session = open({ commandTimeoutMs: 300 });
     const result = await session.run('echo started; sleep 30');

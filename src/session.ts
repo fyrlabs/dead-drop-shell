@@ -1,6 +1,9 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { once } from 'node:events';
 import { performance } from 'node:perf_hooks';
+import type { Readable } from 'node:stream';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 export interface SessionOptions {
   /** POSIX shell executable, e.g. `/bin/sh` or `/bin/bash`. */
@@ -17,6 +20,8 @@ export interface SessionOptions {
 }
 
 const DEFAULT_CANCEL_GRACE_MS = 5000;
+/** How long output may trail the shell's exit. A background job can hold the pipes open. */
+const EXIT_DRAIN_MS = 500;
 
 export interface RunOptions {
   /** Takes every output byte as it arrives. The result's `stdout` and `stderr` are then empty. */
@@ -267,7 +272,15 @@ export class ShellSession {
       timer = setTimeout(() => resolve('timeout'), this.options.commandTimeoutMs);
       this.child.stdout.on('data', onOut);
       this.child.stderr.on('data', onErr);
-      this.onExit = () => resolve('exited');
+      // `exit` can come before the last output is read: let both pipes end first.
+      this.onExit = () => {
+        const ended = (stream: Readable) =>
+          stream.readableEnded ? Promise.resolve() : once(stream, 'end').catch(() => undefined);
+        void Promise.race([
+          Promise.all([ended(this.child.stdout), ended(this.child.stderr)]),
+          sleep(EXIT_DRAIN_MS),
+        ]).then(() => resolve('exited'));
+      };
       // The command travels as a quoted variable and runs through `eval`, so an
       // unterminated quote or heredoc in it cannot swallow the trailer below.
       this.child.stdin.write(
